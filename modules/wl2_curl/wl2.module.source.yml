@@ -1,0 +1,4 @@
+schema: 1
+provides: wl2:curl
+version: 0.1.0
+category: extended

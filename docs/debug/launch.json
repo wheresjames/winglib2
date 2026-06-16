@@ -1,0 +1,50 @@
+{
+  // Example native-debugging launch configurations for the wl2 runtime.
+  // Copy to .vscode/launch.json at the root of your checkout.
+  //
+  // Both configurations build the `wl2` target first (see tasks.json) and then
+  // run `wl2 run --manifest examples/js/resources/resources.yml`. Adjust the
+  // `args` array to point at your own manifest or script.
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug wl2 run (GDB)",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/winglib2/build/app/wl2/wl2",
+      "args": [
+        "run",
+        "--manifest",
+        "winglib2/examples/js/resources/resources.yml"
+      ],
+      "cwd": "${workspaceFolder}",
+      "stopAtEntry": false,
+      "externalConsole": false,
+      "MIMode": "gdb",
+      "preLaunchTask": "build wl2",
+      "setupCommands": [
+        {
+          "description": "Enable pretty-printing for gdb",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ]
+    },
+    {
+      "name": "Debug wl2 run (LLDB)",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/winglib2/build/app/wl2/wl2",
+      "args": [
+        "run",
+        "--manifest",
+        "winglib2/examples/js/resources/resources.yml"
+      ],
+      "cwd": "${workspaceFolder}",
+      "stopAtEntry": false,
+      "externalConsole": false,
+      "MIMode": "lldb",
+      "preLaunchTask": "build wl2"
+    }
+  ]
+}

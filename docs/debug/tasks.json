@@ -1,0 +1,33 @@
+{
+  // Example native-debugging tasks for the wl2 runtime.
+  // Copy to .vscode/tasks.json at the root of your checkout.
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "configure wl2 (debug)",
+      "type": "shell",
+      "command": "cmake",
+      "args": [
+        "-S", "winglib2",
+        "-B", "winglib2/build",
+        "-G", "Ninja",
+        "-DCMAKE_BUILD_TYPE=Debug"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "build wl2",
+      "type": "shell",
+      "command": "cmake",
+      "args": [
+        "--build", "winglib2/build",
+        "--target", "wl2"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": ["$gcc"]
+    }
+  ]
+}

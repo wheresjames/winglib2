@@ -1,0 +1,44 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+@WL2_PACKAGE_CORE_CONFIG@
+@WL2_PACKAGE_MODULE_CONFIG_FRAGMENTS@
+
+set(winglib2_WL2_RESOURCES_MODULE "${CMAKE_CURRENT_LIST_DIR}/WL2Resources.cmake")
+
+include("${CMAKE_CURRENT_LIST_DIR}/WL2TargetPath.cmake")
+wl2_configure_dependency_root()
+include("${CMAKE_CURRENT_LIST_DIR}/WL2Options.cmake")
+set(WL2_FETCH_DEPS OFF CACHE BOOL "Download and build missing Winglib2 dependencies locally" FORCE)
+wl2_configure_dependency_options()
+include("${CMAKE_CURRENT_LIST_DIR}/deps/WL2Dependency.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/deps/WL2QuickJS.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/deps/WL2V8.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/deps/WL2Libmembus.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/WL2Modules.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/WL2Resources.cmake")
+
+set(WL2_JS_ENGINE "@WL2_JS_ENGINE@" CACHE STRING "JavaScript engine backend: quickjs or v8")
+if(WL2_JS_ENGINE STREQUAL "quickjs" AND @WL2_HAVE_QUICKJS@ AND @WL2_PACKAGE_INSTALLS_QUICKJS@ AND NOT TARGET quickjs)
+    add_library(quickjs UNKNOWN IMPORTED GLOBAL)
+    set_target_properties(quickjs PROPERTIES
+        IMPORTED_LOCATION "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_LIBDIR@/@WL2_PACKAGE_QUICKJS_LIBRARY_NAME@")
+    if(@WL2_PACKAGE_INSTALLS_QUICKJS_HEADERS@ AND EXISTS "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_INCLUDEDIR@/quickjs/quickjs.h")
+        set_target_properties(quickjs PROPERTIES
+            INTERFACE_INCLUDE_DIRECTORIES "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_INCLUDEDIR@/quickjs")
+    endif()
+    if(UNIX)
+        target_link_libraries(quickjs INTERFACE m pthread dl)
+    endif()
+elseif(WL2_JS_ENGINE STREQUAL "quickjs" AND @WL2_HAVE_QUICKJS@ AND NOT @WL2_PACKAGE_EXPORTS_QUICKJS@ AND NOT TARGET quickjs)
+    wl2_find_quickjs()
+endif()
+
+if(WL2_JS_ENGINE STREQUAL "v8" AND NOT TARGET v8)
+    wl2_find_v8()
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/winglib2Targets.cmake")
+
+check_required_components(winglib2)

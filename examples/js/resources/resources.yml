@@ -1,0 +1,20 @@
+schema: wl2.resources.v1
+prefix: wl2:/resources
+root: files
+entry: main.js
+
+resources:
+  store:
+    files:
+      - main.js
+      - config.json
+      - empty.txt
+  compress:
+    files:
+      - repeated.txt
+  auto:
+    directories:
+      - assets
+
+exclude:
+  - "*.tmp"

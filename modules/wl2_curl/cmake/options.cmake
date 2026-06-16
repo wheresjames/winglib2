@@ -1,0 +1,14 @@
+if(COMMAND wl2_module_option)
+    wl2_module_option(ENABLE DOC "Build wl2_curl module when libcurl is available")
+endif()
+
+set(WL2_CURL_PROVIDER "auto" CACHE STRING "curl provider: auto, local, package, fetch, or off")
+set_property(CACHE WL2_CURL_PROVIDER PROPERTY STRINGS auto local package fetch off)
+set(WL2_CURL_VERSION "8.11.1" CACHE STRING "curl release version for the fetch provider")
+set(WL2_CURL_URL "https://curl.se/download/curl-${WL2_CURL_VERSION}.tar.xz" CACHE STRING "curl source archive URL")
+set(WL2_CURL_URL_HASH "SHA256=c7ca7db48b0909743eaef34250da02c19bc61d4f1dcedd6603f109409536ab56" CACHE STRING "curl source archive hash for the fetch provider")
+set(WL2_CURL_FETCH_CMAKE_ARGS "" CACHE STRING "Additional CMake arguments for the curl fetch provider")
+
+if(WL2_DEPS_ROOT)
+    set(WL2_CURL_ROOT "${WL2_DEPS_ROOT}/curl" CACHE PATH "Path to a target-local curl install")
+endif()

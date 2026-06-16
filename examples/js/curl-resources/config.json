@@ -1,0 +1,5 @@
+{
+  "url": "https://example.com/",
+  "timeoutMs": 5000,
+  "userAgent": "winglib2-curl-resources-example/0.1"
+}

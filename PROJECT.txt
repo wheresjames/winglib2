@@ -1,0 +1,8 @@
+name            winglib2
+version         2.0.0
+description     C++ embedding JavaScript with static or dynamic module system.
+company         wheresjames
+author          Robert Umbehant
+email           winglib2@wheresjames.com
+url             https://github.com/wheresjames/winglib2
+license         MIT

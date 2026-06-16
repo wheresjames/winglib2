@@ -1,0 +1,5 @@
+if(COMMAND wl2_module_option)
+    wl2_module_option(ENABLE DEFAULT ON DOC "Build wl2_echo example module")
+else()
+    option(WL2_ENABLE_ECHO "Build wl2_echo example module" ON)
+endif()

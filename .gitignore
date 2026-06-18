@@ -1,4 +1,5 @@
 /.deps/
+/deps/
 /build/
 /build-wl2/
 _*

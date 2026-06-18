@@ -1,11 +1,14 @@
 #include "wl2/wl2.h"
+#include "wl2/crash_report.h"
 #include "wl2_membus/wl2_membus.h"
 
 #include <iostream>
 
 void wl2_register_embedded_resources(wl2::ResourceStore& store);
 
-int main() {
+int main(int argc, char** argv) {
+    wl2::crash::installFromArgs(argc, argv);
+
     wl2::RuntimeOptions options;
     options.allowFilesystem = false;
     options.staticModules.push_back(wl2_membus_register_module);

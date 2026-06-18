@@ -4,7 +4,9 @@
 #include <cerrno>
 #include <cstring>
 #include <ctime>
+#include <filesystem>
 #include <string>
+#include <system_error>
 
 #if !defined(_WIN32)
 #include <execinfo.h>
@@ -397,6 +399,18 @@ std::optional<std::filesystem::path> install(const CrashReportConfig& config,
 
     return path;
 #endif
+}
+
+std::optional<std::filesystem::path> installFromArgs(int argc, char** argv,
+    const CrashReportConfig& config) {
+    CrashReportInfo info;
+    if (argc > 0 && argv != nullptr) {
+        info.executable = argv[0];
+        info.argv.assign(argv, argv + argc);
+    }
+    std::error_code ec;
+    info.cwd = std::filesystem::current_path(ec).string();
+    return install(config, info);
 }
 
 } // namespace wl2::crash

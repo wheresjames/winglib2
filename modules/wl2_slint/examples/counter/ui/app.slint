@@ -1,0 +1,30 @@
+// Counter UI for the wl2:slint example, loaded at runtime from an embedded
+// resource via compileFile("wl2:/counter/ui/app.slint").
+//
+// The `selftest` property + Timer let the automated (headless-under-xvfb) test
+// drive one increment and quit without a human click; interactive runs leave
+// `selftest` false so the Timer never starts.
+import { Button, VerticalBox } from "std-widgets.slint";
+
+export component MainWindow inherits Window {
+    title: "wl2:slint counter";
+    in-out property <string> name: "world";
+    in-out property <int> count: 0;
+    in property <bool> selftest: false;
+    callback increment();
+    callback selftest-tick();
+
+    VerticalBox {
+        Text { text: "Hello, " + root.name + " (" + root.count + ")"; }
+        Button {
+            text: "Increment";
+            clicked => { root.increment(); }
+        }
+    }
+
+    Timer {
+        interval: 80ms;
+        running: root.selftest;
+        triggered => { root.selftest-tick(); }
+    }
+}

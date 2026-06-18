@@ -185,6 +185,22 @@ int wl2_resource_tests_entry() {
         && modules.value().requiredModules[0] == "wl2:echo");
     assert(modules.value().optionalModules.size() == 1
         && modules.value().optionalModules[0] == "wl2:curl");
+    assert(!modules.value().allowUi);
+    {
+        std::ofstream out(manifestRoot / "capabilities.yml", std::ios::binary);
+        out << "schema: wl2.project.v1\nprefix: wl2:/manifest\nroot: files\nentry: main.js\n"
+            << "capabilities:\n  ui: true\n";
+    }
+    auto capabilities = wl2::loadResourceManifest(manifestRoot / "capabilities.yml");
+    assert(capabilities);
+    assert(capabilities.value().allowUi);
+    {
+        std::ofstream out(manifestRoot / "bad_capabilities.yml", std::ios::binary);
+        out << "schema: wl2.project.v1\nprefix: wl2:/manifest\nroot: files\nentry: main.js\n"
+            << "capabilities:\n  ui: maybe\n";
+    }
+    auto badCapabilities = wl2::loadResourceManifest(manifestRoot / "bad_capabilities.yml");
+    assert(!badCapabilities && badCapabilities.error().code() == "manifest_invalid_capabilities");
     {
         std::ofstream out(manifestRoot / "modules_dup.yml", std::ios::binary);
         out << "schema: wl2.project.v1\nprefix: wl2:/manifest\nroot: files\nentry: main.js\n"

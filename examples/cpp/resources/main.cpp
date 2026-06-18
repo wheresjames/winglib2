@@ -1,10 +1,13 @@
 #include "wl2/wl2.h"
+#include "wl2/crash_report.h"
 
 #include <iostream>
 
 void wl2_register_embedded_resources(wl2::ResourceStore& store);
 
-int main() {
+int main(int argc, char** argv) {
+    wl2::crash::installFromArgs(argc, argv);
+
     wl2::ResourceStore store;
     wl2_register_embedded_resources(store);
 

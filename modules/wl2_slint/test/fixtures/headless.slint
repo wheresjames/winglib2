@@ -1,0 +1,10 @@
+// A headless fixture component (no window needed to instantiate). Imports a
+// sibling file so compiling it proves compileFile() set the include path to the
+// resource's directory.
+import { Badge } from "parts.slint";
+
+export component App {
+    in-out property <string> label: "hi";
+    in-out property <int> n: 0;
+    Badge { text: root.label; }
+}

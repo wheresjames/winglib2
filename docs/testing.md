@@ -111,3 +111,22 @@ test grants the capability it needs with `wl2 run --network-allow 127.0.0.1[:por
 / `--allow-listen --listen-allow 127.0.0.1`, or sets the equivalent
 `RuntimeOptions` fields in a C++ fixture. Any test that must reach outside
 loopback is labeled `external-network` and excluded from the default run.
+
+## UI Tests
+
+UI tests (for example `wl2:slint`, see [slint.md](slint.md)) split into two
+groups. The default suite is **headless**: it compiles and instantiates
+components, round-trips properties and models, wires `on`/`invoke` callbacks, and
+loads markup through `compileFile()` — all without opening a window, so it runs
+in CI with no display. Opening a window (`show()`/`run()`) is gated by the UI
+capability (`wl2 run --allow-ui` or `RuntimeOptions::allowUi`), and a test that
+asserts the default-denied behavior needs no display either.
+
+Tests that open a real window are labeled `display`, registered only when
+`-DWL2_SLINT_DISPLAY_TESTS=ON`, and kept out of the default run (like
+`external-network` for `wl2:asio`). They are deterministic under a virtual
+framebuffer — run them with `xvfb-run` and the software backend, for example:
+
+```sh
+xvfb-run -a env SLINT_BACKEND=winit-software ctest --test-dir build -L display
+```

@@ -24,7 +24,11 @@ function(wl2_configure_dependency_root)
     wl2_get_target_build_path(_wl2_target_path)
     set(WL2_TARGET_BUILD_PATH "${_wl2_target_path}" CACHE STRING "Target-specific dependency path segment" FORCE)
 
-    set(_default_deps_root "${CMAKE_SOURCE_DIR}/.deps/${WL2_TARGET_BUILD_PATH}")
+    if(WL2_USE_FETCHED_DEPS)
+        set(_default_deps_root "${CMAKE_SOURCE_DIR}/deps/${WL2_TARGET_BUILD_PATH}")
+    else()
+        set(_default_deps_root "${CMAKE_SOURCE_DIR}/.deps/${WL2_TARGET_BUILD_PATH}")
+    endif()
     set(WL2_DEPS_ROOT "${_default_deps_root}" CACHE PATH "Target-specific local dependency prefix")
 
     message(STATUS "Winglib2 dependency target path: ${WL2_TARGET_BUILD_PATH}")

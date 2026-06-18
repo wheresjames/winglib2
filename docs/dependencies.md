@@ -25,6 +25,23 @@ Winglib2 dependency target path: linux-x86_64/debug
 Winglib2 dependency root: .../winglib2/.deps/linux-x86_64/debug
 ```
 
+For a fully target-local dependency build that avoids package/system
+dependencies, configure with:
+
+```sh
+cmake -S . -B build-local-deps \
+  -DWL2_USE_FETCHED_DEPS=ON
+```
+
+`WL2_USE_FETCHED_DEPS=ON` forces `WL2_FETCH_DEPS=ON`, selects `fetch` providers
+for fetch-capable dependencies, and changes the default dependency root to:
+
+```text
+winglib2/deps/<system>-<arch>/<build-type>
+```
+
+Set `WL2_DEPS_ROOT` explicitly to override that location.
+
 ## Provider Model
 
 Dependencies are split by ownership:
@@ -174,6 +191,29 @@ the same provider policy for header-only standalone Asio:
 
 Standalone Asio is header-only, so the fetch provider only downloads and extracts
 headers (no build step). Boost.Asio is intentionally not a provider.
+
+The slint module (`wl2:slint`, gated behind `WL2_ENABLE_SLINT`, default OFF) wraps
+the [Slint](https://slint.dev) UI toolkit. Slint is a Rust library, so the
+provider model deliberately **prefers Slint's prebuilt C++ binary package**
+(consumed via `find_package(Slint)`), which needs **no Rust toolchain**:
+
+```sh
+-DWL2_SLINT_PROVIDER=auto    # default: local root, fetch when WL2_FETCH_DEPS=ON, then system package
+-DWL2_SLINT_PROVIDER=local   # require an installed Slint package under WL2_SLINT_ROOT
+-DWL2_SLINT_PROVIDER=fetch   # download a pinned prebuilt C++ binary package into WL2_SLINT_ROOT
+-DWL2_SLINT_PROVIDER=package # require find_package(Slint)
+-DWL2_SLINT_PROVIDER=source  # build Slint from source via FetchContent (requires cargo/Rust)
+-DWL2_SLINT_PROVIDER=off     # disable slint discovery/module
+-DWL2_SLINT_ROOT=.deps/.../slint
+-DWL2_SLINT_VERSION=1.8.0          # Slint release for the fetch/source providers
+-DWL2_SLINT_URL=<platform package> # prebuilt C++ binary package archive URL
+-DWL2_SLINT_URL_HASH=SHA256=...    # expected package archive hash
+```
+
+Only the opt-in `source` provider needs `cargo`/Rust; every other provider
+consumes the prebuilt package, so default builds and CI stay free of a Rust
+toolchain. The default `WL2_SLINT_URL` targets the Linux x86_64 package; override
+`WL2_SLINT_URL` and `WL2_SLINT_URL_HASH` together for other platforms.
 
 ## V8 Local Install
 

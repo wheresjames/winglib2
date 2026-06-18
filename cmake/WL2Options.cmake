@@ -7,8 +7,10 @@ option(WL2_BUILD_DOCS "Build Doxygen API documentation" ON)
 option(WL2_ENABLE_STRESS_TESTS "Register opt-in stress tests with CTest" OFF)
 option(WL2_ENABLE_LIBMEMBUS "Build first-class libmembus shared-memory wrappers when available" ON)
 option(WL2_ENABLE_EXTENDED_MODULES "Build extended modules by default" ON)
+option(WL2_ENABLE_ALL_MODULES "Build every discovered module in the source tree unless listed in WL2_DISABLE_MODULES" OFF)
 option(WL2_ENABLE_V8 "Compatibility option: build with WL2_JS_ENGINE=v8" OFF)
 option(WL2_FETCH_DEPS "Download and build missing dependencies locally" ON)
+option(WL2_USE_FETCHED_DEPS "Fetch and use target-local dependencies instead of package/system dependencies" OFF)
 
 set(WL2_JS_ENGINE "quickjs" CACHE STRING "JavaScript engine backend: quickjs or v8")
 set_property(CACHE WL2_JS_ENGINE PROPERTY STRINGS quickjs v8)
@@ -29,6 +31,12 @@ set(WL2_V8_EXTRA_LIBRARIES "" CACHE STRING "Additional libraries required by the
 set(WL2_LIBMEMBUS_TARGET_VERSION "1.2.0" CACHE STRING "Target libmembus API version for Winglib2 integration")
 set(WL2_LIBMEMBUS_PROVIDER "auto" CACHE STRING "libmembus provider: auto, local, package, fetch, or off")
 set_property(CACHE WL2_LIBMEMBUS_PROVIDER PROPERTY STRINGS auto local package fetch off)
+
+if(WL2_USE_FETCHED_DEPS)
+    set(WL2_FETCH_DEPS ON CACHE BOOL "Download and build missing dependencies locally" FORCE)
+    set(WL2_QUICKJS_PROVIDER "fetch" CACHE STRING "QuickJS provider: auto, local, package, fetch, or off" FORCE)
+    set(WL2_LIBMEMBUS_PROVIDER "fetch" CACHE STRING "libmembus provider: auto, local, package, fetch, or off" FORCE)
+endif()
 
 function(wl2_configure_dependency_options)
     if(NOT WL2_DEPS_ROOT)

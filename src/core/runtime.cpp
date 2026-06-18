@@ -90,6 +90,13 @@ Result<void> Runtime::authorizeNetworkListen(std::string_view host, uint16_t por
     return {};
 }
 
+Result<void> Runtime::authorizeUi() const {
+    if (!options_.allowUi) {
+        return Error("ui_denied", "Opening a window is not permitted by policy");
+    }
+    return {};
+}
+
 Result<void> Runtime::initialize() {
     if (initialized_) {
         return {};

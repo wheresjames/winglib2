@@ -51,6 +51,7 @@ struct ResourceManifest {
     std::vector<ModuleDependency> moduleDependencies;  ///< Git-pinned module dependencies.
     std::vector<std::string> testRoots;     ///< Directories searched for tests.
     std::string testPattern = "*.test.js";  ///< Glob matching test files.
+    bool allowUi = false;  ///< App requests permission to open windows/run UI loops.
 
     /// Absolute resource root (baseDir / root).
     std::filesystem::path resolvedRoot() const;

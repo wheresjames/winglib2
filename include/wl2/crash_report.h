@@ -101,4 +101,23 @@ void unregisterThread(const char* name);
 std::optional<std::filesystem::path> install(const CrashReportConfig& config,
     const CrashReportInfo& info);
 
+/**
+ * @brief Install crash handlers for a standalone executable.
+ *
+ * Convenience wrapper around install() that fills CrashReportInfo from the
+ * process argument vector and current working directory. Use this for any
+ * `main()` that wants crash reporting without assembling host context by hand;
+ * embedders that can supply richer context (engine, modules, manifest) should
+ * populate a CrashReportInfo and call install() directly.
+ *
+ * @param argc Argument count, as received by main().
+ * @param argv Argument vector, as received by main(). May be null when argc is 0.
+ * @param config Reporting mode and destination. Defaults to Mode::Auto, which
+ * writes `crash-YYYYMMDD-HHMMSS-PID.log` in the current directory.
+ * @return The report path that will be written on a crash, or std::nullopt when
+ * reporting is disabled or unsupported.
+ */
+std::optional<std::filesystem::path> installFromArgs(int argc, char** argv,
+    const CrashReportConfig& config = {});
+
 } // namespace wl2::crash

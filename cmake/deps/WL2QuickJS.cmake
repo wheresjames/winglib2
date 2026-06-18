@@ -45,7 +45,8 @@ function(wl2_find_quickjs)
             URL "${WL2_QUICKJS_URL}"
             DOWNLOAD_EXTRACT_TIMESTAMP TRUE
         )
-        FetchContent_Populate(quickjs_source)
+        FetchContent_MakeAvailable(quickjs_source)
+        FetchContent_GetProperties(quickjs_source SOURCE_DIR quickjs_source_SOURCE_DIR)
 
         add_library(quickjs STATIC
             "${quickjs_source_SOURCE_DIR}/quickjs.c"

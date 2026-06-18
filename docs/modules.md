@@ -59,9 +59,10 @@ category: core      # or extended
 ```
 
 Core modules default to enabled. Extended modules default from
-`WL2_ENABLE_EXTENDED_MODULES`. `WL2_DISABLE_MODULES` skips by directory name or
-provided module name, and `WL2_EXTRA_MODULE_DIRS` adds discovery roots without
-editing global CMake.
+`WL2_ENABLE_EXTENDED_MODULES`. `WL2_ENABLE_ALL_MODULES=ON` forces every
+discovered module option on, including modules that normally default off.
+`WL2_DISABLE_MODULES` skips by directory name or provided module name, and
+`WL2_EXTRA_MODULE_DIRS` adds discovery roots without editing global CMake.
 
 Put module cache options in `cmake/options.cmake`. This includes the enable
 switch and any module dependency provider defaults, source URLs, versions,
@@ -450,11 +451,13 @@ and include them from the module `CMakeLists.txt` with `wl2_add_module_tests()`.
 Core runtime tests remain under `test/core`.
 
 - **Labels.** Apply a per-area label plus role labels. Module label is the short
-  name (`curl`, `fs`, `membus`, `asio`). Role labels in use: `unit`, `js`,
-  `integration`, `smoke`, `dynamic`, `examples`, `stress`. Network tests that
-  reach the public internet must be labeled `external-network` and excluded from
-  the default suite; `wl2:asio` tests bind only to loopback and stay in the
-  default suite.
+  name (`curl`, `fs`, `membus`, `asio`, `slint`). Role labels in use: `unit`,
+  `js`, `integration`, `smoke`, `dynamic`, `examples`, `stress`, `display`.
+  Network tests that reach the public internet must be labeled `external-network`
+  and excluded from the default suite; `wl2:asio` tests bind only to loopback and
+  stay in the default suite. UI tests that open a real window must be labeled
+  `display` and excluded from the default suite; `wl2:slint`'s headless tests
+  (compile/instantiate, properties, callbacks) stay in the default suite.
 - **Fixtures.** Do not add Python or other runtime dependencies for fixtures.
   Use a small in-process C++ fixture (see
   `modules/wl2_curl/test/wl2_curl_fixture.cpp` for a local HTTP server). Keep

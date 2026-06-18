@@ -60,8 +60,20 @@ bool is_known_top_level(const std::string& key) {
         "modules",
         "tests",
         "dependencies",
+        "capabilities",
     };
     return keys.contains(key);
+}
+
+Result<bool> parse_bool_value(const std::string& value, const std::string& key, int lineNumber) {
+    if (value == "true" || value == "yes" || value == "on") {
+        return true;
+    }
+    if (value == "false" || value == "no" || value == "off") {
+        return false;
+    }
+    return Error("manifest_invalid_capabilities",
+        "Expected boolean for capabilities." + key + " at line " + std::to_string(lineNumber));
 }
 
 Result<void> assign_dependency_field(
@@ -337,6 +349,9 @@ Result<ResourceManifest> loadResourceManifest(const std::filesystem::path& path)
                 manifest.entry = value;
             } else if (key == "exclude" && !value.empty()) {
                 return Error("manifest_invalid_exclude", "exclude must be a list at line " + std::to_string(lineNumber));
+            } else if (key == "capabilities" && !value.empty()) {
+                return Error("manifest_invalid_capabilities",
+                    "capabilities must be a mapping at line " + std::to_string(lineNumber));
             }
             continue;
         }
@@ -402,6 +417,19 @@ Result<ResourceManifest> loadResourceManifest(const std::filesystem::path& path)
             return Error("manifest_invalid_tests", "Expected roots or pattern at line " + std::to_string(lineNumber));
         }
         if (section == "tests") {
+            continue;
+        }
+
+        if (section == "capabilities" && indent == 2) {
+            if (key != "ui") {
+                return Error("manifest_invalid_capabilities",
+                    "Expected ui under capabilities at line " + std::to_string(lineNumber));
+            }
+            auto parsed = parse_bool_value(value, key, lineNumber);
+            if (!parsed) {
+                return parsed.error();
+            }
+            manifest.allowUi = parsed.value();
             continue;
         }
 

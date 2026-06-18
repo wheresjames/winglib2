@@ -1,0 +1,675 @@
+// Showcase UI for wl2:slint. Embedded as a wl2:/ resource and compiled by the
+// interpreter at runtime.
+import {
+    Button,
+    CheckBox,
+    HorizontalBox,
+    Slider,
+    VerticalBox
+} from "std-widgets.slint";
+
+component NavButton inherits Rectangle {
+    in property <string> title;
+    in property <bool> selected;
+    in property <brush> panel;
+    in property <brush> accent-soft;
+    in property <brush> accent;
+    in property <brush> border;
+    in property <brush> text;
+    callback clicked();
+
+    height: 42px;
+    border-radius: 6px;
+    background: selected ? accent-soft : panel;
+    border-width: 1px;
+    border-color: selected ? accent : border;
+
+    Text {
+        text: root.title;
+        color: root.text;
+        font-weight: root.selected ? 700 : 400;
+        vertical-alignment: center;
+        x: 14px;
+    }
+
+    TouchArea { clicked => { root.clicked(); } }
+}
+
+component MetricTile inherits Rectangle {
+    in property <string> label;
+    in property <int> value;
+    in property <brush> tone;
+    in property <brush> panel;
+    in property <brush> border;
+    in property <brush> text;
+    in property <brush> muted;
+
+    height: 88px;
+    border-radius: 8px;
+    background: panel;
+    border-width: 1px;
+    border-color: border;
+
+    VerticalBox {
+        padding: 14px;
+        spacing: 4px;
+        Text { text: root.label; color: root.muted; }
+        Text {
+            text: root.value;
+            color: root.tone;
+            font-size: 28px;
+            font-weight: 800;
+        }
+    }
+}
+
+component Chip inherits Rectangle {
+    in property <string> label;
+    in property <bool> selected;
+    in property <brush> panel;
+    in property <brush> accent;
+    in property <brush> accent-soft;
+    in property <brush> border;
+    in property <brush> text;
+    callback clicked();
+
+    width: 82px;
+    height: 32px;
+    border-radius: 6px;
+    background: selected ? accent-soft : panel;
+    border-width: 1px;
+    border-color: selected ? accent : border;
+
+    Text {
+        text: root.label;
+        color: root.text;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    TouchArea { clicked => { root.clicked(); } }
+}
+
+component Swatch inherits Rectangle {
+    in property <string> label;
+    in property <brush> value;
+    in property <bool> selected;
+    in property <brush> panel;
+    in property <brush> border;
+    in property <brush> text;
+    callback clicked();
+
+    height: 42px;
+    border-radius: 6px;
+    background: panel;
+    border-width: 1px;
+    border-color: selected ? value : border;
+
+    HorizontalBox {
+        padding: 8px;
+        spacing: 10px;
+        Rectangle {
+            width: 24px;
+            height: 24px;
+            border-radius: 4px;
+            background: root.value;
+        }
+        Text {
+            text: root.label;
+            color: root.text;
+            vertical-alignment: center;
+        }
+    }
+
+    TouchArea { clicked => { root.clicked(); } }
+}
+
+component TaskRow inherits Rectangle {
+    in property <string> title;
+    in property <string> owner;
+    in property <bool> done;
+    in property <int> priority;
+    in property <brush> panel;
+    in property <brush> done-panel;
+    in property <brush> border;
+    in property <brush> text;
+    in property <brush> muted;
+    in property <brush> accent;
+    callback toggled();
+
+    height: 56px;
+    border-radius: 6px;
+    background: root.done ? done-panel : panel;
+    border-width: 1px;
+    border-color: border;
+
+    HorizontalBox {
+        padding: 10px;
+        spacing: 12px;
+
+        CheckBox {
+            checked: root.done;
+            toggled => { root.toggled(); }
+        }
+
+        VerticalBox {
+            spacing: 2px;
+            Text {
+                text: root.title;
+                color: root.done ? root.accent : root.text;
+                font-weight: 650;
+            }
+            Text {
+                text: "Owner: " + root.owner + "  Priority: " + root.priority;
+                color: root.muted;
+                font-size: 12px;
+            }
+        }
+    }
+}
+
+component ThemedInput inherits Rectangle {
+    in-out property <string> value;
+    in property <string> placeholder;
+    in property <brush> panel-2;
+    in property <brush> border;
+    in property <brush> text;
+    in property <brush> muted;
+    in property <brush> accent;
+    callback accepted();
+
+    height: 42px;
+    border-radius: 6px;
+    background: panel-2;
+    border-width: 1px;
+    border-color: input.has-focus ? accent : border;
+
+    Text {
+        x: 12px;
+        y: 0;
+        width: parent.width - 24px;
+        height: parent.height;
+        text: root.placeholder;
+        color: root.muted;
+        vertical-alignment: center;
+        visible: root.value == "";
+    }
+
+    input := TextInput {
+        x: 12px;
+        y: 0;
+        width: parent.width - 24px;
+        height: parent.height;
+        text <=> root.value;
+        color: root.text;
+        font-size: 14px;
+        vertical-alignment: center;
+        single-line: true;
+        accepted => { root.accepted(); }
+    }
+}
+
+export component MainWindow inherits Window {
+    title: "wl2:slint showcase";
+    preferred-width: 1060px;
+    preferred-height: 720px;
+    min-width: 820px;
+    min-height: 560px;
+
+    in-out property <string> operator: "Winglib2";
+    in-out property <string> draft: "";
+    in-out property <string> status: "Ready";
+    in-out property <string> selected-section: "Overview";
+    in-out property <string> last-refresh: "never";
+    in-out property <string> theme-mode: "System";
+    in-out property <string> popup-mode: "";
+    in-out property <string> selected-file: "No file selected";
+    in-out property <string> selected-color: "Blue";
+    in-out property <float> threshold: 72;
+    in-out property <bool> notifications: true;
+    in-out property <brush> accent: #2563eb;
+    in-out property <{ open: int, done: int, score: int }> stats: { open: 0, done: 0, score: 0 };
+    in-out property <[{ title: string, owner: string, done: bool, priority: int }]> tasks: [];
+    in-out property <[{ name: string, path: string, size: string }]> files: [];
+    in-out property <[{ name: string, value: brush }]> colors: [];
+    in property <bool> selftest: false;
+    in-out property <bool> system-dark: false;
+
+    property <bool> dark: root.theme-mode == "Dark" || (root.theme-mode == "System" && root.system-dark);
+    property <brush> bg: root.dark ? #0f172a : #f8fafc;
+    property <brush> panel: root.dark ? #111827 : #ffffff;
+    property <brush> panel-2: root.dark ? #1f2937 : #f1f5f9;
+    property <brush> done-panel: root.dark ? #063b2f : #ecfdf5;
+    property <brush> text: root.dark ? #f8fafc : #111827;
+    property <brush> muted: root.dark ? #cbd5e1 : #475569;
+    property <brush> border: root.dark ? #334155 : #d1d5db;
+    property <brush> overlay: root.dark ? #000000aa : #00000066;
+    property <brush> accent-soft: root.dark ? #1e3a5f : #dbeafe;
+    property <brush> danger: #dc2626;
+    property <brush> good: #059669;
+
+    background: root.bg;
+
+    callback add-task(string);
+    callback toggle-task(int);
+    callback select-section(string);
+    callback set-threshold(float);
+    callback set-notifications(bool);
+    callback refresh();
+    callback set-theme(string);
+    callback open-popup(string);
+    callback close-popup();
+    callback choose-file(int);
+    callback choose-color(int);
+    callback native-open-file();
+    callback native-open-files();
+    callback native-save-file();
+    callback native-pick-folder();
+    callback selftest-tick();
+
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: root.bg;
+
+        VerticalBox {
+            width: parent.width;
+            height: parent.height;
+            padding: 18px;
+            spacing: 14px;
+
+            Rectangle {
+                height: 92px;
+                border-radius: 8px;
+                background: root.panel;
+                border-width: 1px;
+                border-color: root.border;
+
+                HorizontalBox {
+                    padding: 18px;
+                    spacing: 18px;
+                    alignment: space-between;
+
+                    VerticalBox {
+                        spacing: 4px;
+                        Text {
+                            text: root.operator;
+                            color: root.text;
+                            font-size: 24px;
+                            font-weight: 800;
+                        }
+                        Text {
+                            text: "Interpreter UI with widgets, models, modal popups, file and color selection";
+                            color: root.muted;
+                            font-size: 14px;
+                        }
+                    }
+
+                    VerticalBox {
+                        alignment: center;
+                        Text {
+                            text: "Theme: " + root.theme-mode;
+                            color: root.text;
+                            horizontal-alignment: right;
+                        }
+                        Text {
+                            text: "Last refresh: " + root.last-refresh;
+                            color: root.muted;
+                            horizontal-alignment: right;
+                        }
+                    }
+                }
+            }
+
+            HorizontalBox {
+                spacing: 14px;
+
+                VerticalBox {
+                    width: 210px;
+                    spacing: 10px;
+
+                    NavButton {
+                        title: "Overview";
+                        selected: root.selected-section == "Overview";
+                        panel: root.panel;
+                        accent-soft: root.accent-soft;
+                        accent: root.accent;
+                        border: root.border;
+                        text: root.text;
+                        clicked => { root.select-section("Overview"); }
+                    }
+                    NavButton {
+                        title: "Work Queue";
+                        selected: root.selected-section == "Work Queue";
+                        panel: root.panel;
+                        accent-soft: root.accent-soft;
+                        accent: root.accent;
+                        border: root.border;
+                        text: root.text;
+                        clicked => { root.select-section("Work Queue"); }
+                    }
+                    NavButton {
+                        title: "Settings";
+                        selected: root.selected-section == "Settings";
+                        panel: root.panel;
+                        accent-soft: root.accent-soft;
+                        accent: root.accent;
+                        border: root.border;
+                        text: root.text;
+                        clicked => { root.select-section("Settings"); }
+                    }
+
+                    Rectangle { height: 1px; background: root.border; }
+
+                    CheckBox {
+                        text: "Notifications";
+                        checked: root.notifications;
+                        toggled => { root.set-notifications(!root.notifications); }
+                    }
+
+                    Button { text: "Refresh"; clicked => { root.refresh(); } }
+                    Button { text: "Open popup"; clicked => { root.open-popup("About"); } }
+                    Button { text: "Mock files"; clicked => { root.open-popup("File"); } }
+                    Button { text: "Native open"; clicked => { root.native-open-file(); } }
+                    Button { text: "Pick color"; clicked => { root.open-popup("Color"); } }
+                }
+
+                VerticalBox {
+                    spacing: 14px;
+
+                    HorizontalBox {
+                        spacing: 12px;
+
+                        MetricTile {
+                            label: "Open";
+                            value: root.stats.open;
+                            tone: root.accent;
+                            panel: root.panel;
+                            border: root.border;
+                            text: root.text;
+                            muted: root.muted;
+                        }
+                        MetricTile {
+                            label: "Done";
+                            value: root.stats.done;
+                            tone: root.good;
+                            panel: root.panel;
+                            border: root.border;
+                            text: root.text;
+                            muted: root.muted;
+                        }
+                        MetricTile {
+                            label: "Risk";
+                            value: root.stats.score;
+                            tone: root.stats.score > root.threshold ? root.danger : root.accent;
+                            panel: root.panel;
+                            border: root.border;
+                            text: root.text;
+                            muted: root.muted;
+                        }
+                    }
+
+                    Rectangle {
+                        height: 78px;
+                        background: root.panel;
+                        border-color: root.border;
+                        border-width: 1px;
+                        border-radius: 8px;
+
+                        HorizontalBox {
+                            padding: 12px;
+                            spacing: 10px;
+
+                            ThemedInput {
+                                value <=> root.draft;
+                                placeholder: "Add a task from JavaScript-backed state";
+                                panel-2: root.panel-2;
+                                border: root.border;
+                                text: root.text;
+                                muted: root.muted;
+                                accent: root.accent;
+                                accepted => { root.add-task(root.draft); }
+                            }
+
+                            Button {
+                                width: 94px;
+                                text: "Add";
+                                clicked => { root.add-task(root.draft); }
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        background: root.panel;
+                        border-color: root.border;
+                        border-width: 1px;
+                        border-radius: 8px;
+
+                        VerticalBox {
+                            padding: 12px;
+                            spacing: 10px;
+
+                            HorizontalBox {
+                                spacing: 12px;
+                                Text {
+                                    text: root.selected-section;
+                                    font-size: 18px;
+                                    font-weight: 800;
+                                    color: root.text;
+                                }
+                                Text {
+                                    text: root.status;
+                                    color: root.muted;
+                                    horizontal-alignment: right;
+                                }
+                            }
+
+                            if root.selected-section == "Settings": VerticalBox {
+                                spacing: 10px;
+                                HorizontalBox {
+                                    spacing: 8px;
+                                    Chip {
+                                        label: "System";
+                                        selected: root.theme-mode == "System";
+                                        panel: root.panel-2;
+                                        accent: root.accent;
+                                        accent-soft: root.accent-soft;
+                                        border: root.border;
+                                        text: root.text;
+                                        clicked => { root.set-theme("System"); }
+                                    }
+                                    Chip {
+                                        label: "Light";
+                                        selected: root.theme-mode == "Light";
+                                        panel: root.panel-2;
+                                        accent: root.accent;
+                                        accent-soft: root.accent-soft;
+                                        border: root.border;
+                                        text: root.text;
+                                        clicked => { root.set-theme("Light"); }
+                                    }
+                                    Chip {
+                                        label: "Dark";
+                                        selected: root.theme-mode == "Dark";
+                                        panel: root.panel-2;
+                                        accent: root.accent;
+                                        accent-soft: root.accent-soft;
+                                        border: root.border;
+                                        text: root.text;
+                                        clicked => { root.set-theme("Dark"); }
+                                    }
+                                }
+
+                                Text { text: "Risk threshold: " + root.threshold; color: root.text; }
+                                Slider {
+                                    minimum: 0;
+                                    maximum: 120;
+                                    value: root.threshold;
+                                    changed => { root.set-threshold(self.value); }
+                                }
+                                Text {
+                                    text: "Selected file: " + root.selected-file;
+                                    color: root.muted;
+                                }
+                                HorizontalBox {
+                                    spacing: 8px;
+                                    Button {
+                                        text: "Open";
+                                        clicked => { root.native-open-file(); }
+                                    }
+                                    Button {
+                                        text: "Open Many";
+                                        clicked => { root.native-open-files(); }
+                                    }
+                                    Button {
+                                        text: "Save";
+                                        clicked => { root.native-save-file(); }
+                                    }
+                                    Button {
+                                        text: "Folder";
+                                        clicked => { root.native-pick-folder(); }
+                                    }
+                                }
+                                Text {
+                                    text: "Accent: " + root.selected-color;
+                                    color: root.muted;
+                                }
+                            }
+
+                            if root.selected-section != "Settings": VerticalBox {
+                                spacing: 8px;
+                                for task[index] in root.tasks: TaskRow {
+                                    title: task.title;
+                                    owner: task.owner;
+                                    done: task.done;
+                                    priority: task.priority;
+                                    panel: root.panel-2;
+                                    done-panel: root.done-panel;
+                                    border: root.border;
+                                    text: root.text;
+                                    muted: root.muted;
+                                    accent: root.accent;
+                                    toggled => { root.toggle-task(index); }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if root.popup-mode != "": Rectangle {
+            width: parent.width;
+            height: parent.height;
+            background: root.overlay;
+
+            Rectangle {
+                width: 520px;
+                height: root.popup-mode == "File" ? 430px : 360px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                border-radius: 10px;
+                background: root.panel;
+                border-width: 1px;
+                border-color: root.border;
+
+                VerticalBox {
+                    padding: 18px;
+                    spacing: 12px;
+
+                    HorizontalBox {
+                        Text {
+                            text: root.popup-mode == "File" ? "Select a file" : root.popup-mode == "Color" ? "Choose accent color" : "About this showcase";
+                            color: root.text;
+                            font-size: 20px;
+                            font-weight: 800;
+                        }
+                        Button {
+                            width: 72px;
+                            text: "Close";
+                            clicked => { root.close-popup(); }
+                        }
+                    }
+
+                    if root.popup-mode == "About": VerticalBox {
+                        spacing: 8px;
+                        Text {
+                            text: "This popup is declared in Slint and controlled from JavaScript callbacks.";
+                            color: root.text;
+                        }
+                        Text {
+                            text: "The same component also shows array models, structs, timers, two-way text binding, sliders, and theme state.";
+                            color: root.muted;
+                        }
+                        Button {
+                            text: "Switch to Work Queue";
+                            clicked => { root.select-section("Work Queue"); root.close-popup(); }
+                        }
+                    }
+
+                    if root.popup-mode == "File": VerticalBox {
+                        spacing: 8px;
+                        Text {
+                            text: "Native dialogs use the platform picker when built; mock files keep this popup headless-testable.";
+                            color: root.muted;
+                        }
+                        HorizontalBox {
+                            spacing: 8px;
+                            Button {
+                                text: "Native Open";
+                                clicked => { root.native-open-file(); root.close-popup(); }
+                            }
+                            Button {
+                                text: "Native Save";
+                                clicked => { root.native-save-file(); root.close-popup(); }
+                            }
+                            Button {
+                                text: "Native Folder";
+                                clicked => { root.native-pick-folder(); root.close-popup(); }
+                            }
+                        }
+                        for file[index] in root.files: Rectangle {
+                            height: 56px;
+                            border-radius: 6px;
+                            background: root.panel-2;
+                            border-width: 1px;
+                            border-color: root.border;
+                            HorizontalBox {
+                                padding: 10px;
+                                spacing: 10px;
+                                VerticalBox {
+                                    Text { text: file.name; color: root.text; font-weight: 650; }
+                                    Text { text: file.path + "  " + file.size; color: root.muted; font-size: 12px; }
+                                }
+                                Button {
+                                    width: 82px;
+                                    text: "Select";
+                                    clicked => { root.choose-file(index); }
+                                }
+                            }
+                        }
+                    }
+
+                    if root.popup-mode == "Color": VerticalBox {
+                        spacing: 8px;
+                        for color[index] in root.colors: Swatch {
+                            label: color.name;
+                            value: color.value;
+                            selected: root.selected-color == color.name;
+                            panel: root.panel-2;
+                            border: root.border;
+                            text: root.text;
+                            clicked => { root.choose-color(index); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Timer {
+        interval: 120ms;
+        running: root.selftest;
+        triggered => { root.selftest-tick(); }
+    }
+}

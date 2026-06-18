@@ -116,6 +116,12 @@ struct RuntimeOptions {
     /// Endpoints a module may listen on when allowListening is true. Same entry
     /// grammar as networkAllowList. An empty list denies all listening.
     std::vector<std::string> listenAllowList;
+
+    /// Allow modules to open a window and run a UI event loop. Disabled by
+    /// default so headless and server contexts never open a display. Opening a
+    /// window is a host-resource action like network or filesystem access;
+    /// compiling and instantiating a UI component does not require it.
+    bool allowUi = false;
 };
 
 /**
@@ -238,6 +244,18 @@ public:
      * `network_listen_denied`.
      */
     Result<void> authorizeNetworkListen(std::string_view host, uint16_t port) const;
+
+    /**
+     * @brief Authorize opening a window / running a UI event loop against policy.
+     *
+     * UI access is denied by default. It is permitted only when
+     * RuntimeOptions::allowUi is set. This is the single policy gate UI modules
+     * such as `wl2:slint` consult before showing a window or entering the event
+     * loop; compiling and instantiating a component does not require it.
+     *
+     * @return Success when permitted, or an Error with code `ui_denied`.
+     */
+    Result<void> authorizeUi() const;
 
     /**
      * @brief Shared host support for native asynchronous module work.

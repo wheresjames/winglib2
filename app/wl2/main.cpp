@@ -66,6 +66,7 @@ struct RunCommand {
     std::vector<std::string> networkAllowList;
     bool allowListening = false;
     std::vector<std::string> listenAllowList;
+    bool allowUi = false;
     wl2::crash::CrashReportConfig crashReport;
 };
 
@@ -92,7 +93,7 @@ struct TestCommand {
 void usage(std::ostream& out = std::cerr) {
     out
         << "usage:\n"
-        << "  wl2 run [--manifest wl2.yml] [--watch] [--stack-traces=auto|on|off] [--map-resource host:wl2:/prefix] [--trace-resources] [--load-module path] [--allow-module-shadow] [--allow-network] [--network-allow host[:port]] [--allow-listen] [--listen-allow host[:port]] [--crash-report=off|auto|<path>] [--crash-report-dir dir] [script] [-- script-args...]\n"
+        << "  wl2 run [--manifest wl2.yml] [--watch] [--stack-traces=auto|on|off] [--map-resource host:wl2:/prefix] [--trace-resources] [--load-module path] [--allow-module-shadow] [--allow-network] [--network-allow host[:port]] [--allow-listen] [--listen-allow host[:port]] [--allow-ui] [--crash-report=off|auto|<path>] [--crash-report-dir dir] [script] [-- script-args...]\n"
         << "  wl2 config [--manifest wl2.yml] [--json] [--map-resource host:wl2:/prefix] [--load-module path]\n"
         << "  wl2 resources <list|read|extract> [--manifest wl2.yml] [--map-resource host:wl2:/prefix] [executable] [path] [--out dir] [--raw]\n"
         << "  wl2 module validate <library-path>\n"
@@ -613,6 +614,10 @@ std::optional<RunCommand> parse_run_command(int argc, char** argv, int start, bo
             command.listenAllowList.emplace_back(arg.substr(listenAllowPrefix.size()));
             continue;
         }
+        if (arg == "--allow-ui") {
+            command.allowUi = true;
+            continue;
+        }
         if (arg == "--crash-report") {
             if (++i >= argc || !apply_crash_report_value(command.crashReport, argv[i])) {
                 return std::nullopt;
@@ -708,6 +713,7 @@ std::optional<RunCommand> parse_run_command(int argc, char** argv, int start, bo
         }
         command.requiredModules = manifest.requiredModules;
         command.optionalModules = manifest.optionalModules;
+        command.allowUi = command.allowUi || manifest.allowUi;
         projectRoot = manifest.baseDir;
         hasManifest = true;
     }
@@ -900,6 +906,7 @@ int run_script(wl2::RuntimeOptions options, const RunCommand& command) {
     options.networkAllowList = command.networkAllowList;
     options.allowListening = command.allowListening;
     options.listenAllowList = command.listenAllowList;
+    options.allowUi = command.allowUi;
     wl2::Runtime runtime(std::move(options));
     auto result = runtime.runModule(command.script);
     if (!result) {
@@ -1597,7 +1604,9 @@ int config_json_command(const ConfigCommand& command, const wl2::ResourceStore& 
         std::cout << "},\"listen\":{\"allow\":"
                   << (defaults.allowListening ? "true" : "false") << ",\"allowList\":";
         print_json_string_array(defaults.listenAllowList);
-        std::cout << "}},\n";
+        const bool uiAllowed = command.manifest ? command.manifest->allowUi : defaults.allowUi;
+        std::cout << "},\"ui\":{\"allow\":"
+                  << (uiAllowed ? "true" : "false") << "}},\n";
     }
     std::cout << "  \"dependencies\":[";
     for (size_t i = 0; i < depStatuses.size(); ++i) {
@@ -1716,6 +1725,9 @@ int config_command(const ConfigCommand& command) {
                   << " (default)\n";
         std::cout << "  network listen: " << (defaults.allowListening ? "allowed" : "denied")
                   << " (default)\n";
+        const bool uiAllowed = command.manifest ? command.manifest->allowUi : defaults.allowUi;
+        std::cout << "  ui: " << (uiAllowed ? "allowed" : "denied")
+                  << (command.manifest ? " (manifest)" : " (default)") << '\n';
     }
     std::cout << "dependencies:\n";
     auto depStatuses = config_dependency_status(command);

@@ -43,6 +43,20 @@ set_tests_properties(scripts.wl2_slint_callbacks PROPERTIES
     LABELS "js;slint;integration;smoke"
     TIMEOUT 30)
 
+# UI-on-3D producer: off-screen software render to a FrameRing + synthetic
+# pointer injection flips a property and re-renders. Needs the shared-memory
+# capability for the ring; no display/GPU.
+add_test(NAME scripts.wl2_slint_offscreen_roundtrip
+    COMMAND
+        $<TARGET_FILE:wl2>
+        run
+        --allow-shared-memory
+        --shared-memory-allow /wl2_3d_test_
+        ${CMAKE_CURRENT_SOURCE_DIR}/js/offscreen_roundtrip.test.js)
+set_tests_properties(scripts.wl2_slint_offscreen_roundtrip PROPERTIES
+    LABELS "js;slint;membus;integration"
+    TIMEOUT 30)
+
 # Default-denied UI policy: no --allow-ui is passed, so show() must be denied.
 add_test(NAME scripts.wl2_slint_permission_denied
     COMMAND

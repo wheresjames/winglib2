@@ -1,0 +1,192 @@
+// Dashboard UI for the wl2:3d × wl2:slint example.
+//
+// The 3D engine renders into a FrameRing that JavaScript copies into the
+// `viewport` image every tick (3D-into-UI). Projected 3D labels are drawn as an
+// overlay layer on top of the image, and the control panel emits callbacks that
+// JavaScript turns into engine operations. A Timer drives `tick()` in the
+// windowed modes; the headless mode advances the engine directly.
+import { Button, VerticalBox, HorizontalBox, GroupBox, GridBox, Slider, CheckBox } from "std-widgets.slint";
+
+// One projected 3D label, already converted to viewport pixels by JavaScript.
+export struct OverlayLabel {
+    x: length,
+    y: length,
+    text: string,
+    accent: bool,
+    visible: bool,
+}
+
+// A single read-out in the stats panel.
+export struct Stat {
+    label: string,
+    value: string,
+}
+
+export component Dashboard inherits Window {
+    title: "wl2:3d × wl2:slint — 3D UI Dashboard";
+    preferred-width: 1180px;
+    preferred-height: 700px;
+    background: #11151c;
+
+    // --- Inputs set from JavaScript ------------------------------------------
+    in property <image> viewport;
+    in property <[OverlayLabel]> overlays;
+    in property <[Stat]> stats;
+    in property <string> status: "Ready";
+    in property <string> action: "—";
+    in property <string> attention-cue: "none";
+    in property <string> primitive-kind: "—";
+    in property <int> viewport-width: 960;
+    in property <int> viewport-height: 540;
+    in property <bool> live: false;
+
+    // --- Callbacks into JavaScript -------------------------------------------
+    callback orbit(int);            // -1 left, +1 right
+    callback tilt(int);             // -1 down, +1 up
+    callback zoom(int);             // -1 out, +1 in
+    callback reset-view();
+    callback add-marker();
+    callback next-primitive();
+    callback cycle-attention();
+    callback burst();
+    callback play-timeline();
+    callback spawn-detection();
+    callback set-spin(bool);
+    callback tick();                // ~30 Hz in windowed mode
+    callback viewport-clicked(length, length);
+
+    // Drives the live render/animation loop while a window is open.
+    Timer {
+        interval: 33ms;
+        running: root.live;
+        triggered => { root.tick(); }
+    }
+
+    HorizontalBox {
+        padding: 12px;
+        spacing: 12px;
+
+        // ---- Left: the live 3D viewport with a projected-label overlay ------
+        VerticalBox {
+            spacing: 8px;
+            Text {
+                text: "Live 3D viewport (engine → FrameRing → Slint image)";
+                color: #9fb3c8;
+                font-size: 13px;
+            }
+            Rectangle {
+                width: root.viewport-width * 1px;
+                height: root.viewport-height * 1px;
+                border-width: 1px;
+                border-color: #2a3340;
+                border-radius: 6px;
+                clip: true;
+                background: #05070a;
+
+                Image {
+                    width: 100%;
+                    height: 100%;
+                    source: root.viewport;
+                    image-fit: contain;
+                }
+
+                // Projected 3D anchors, drawn on top of the rendered frame.
+                for label in root.overlays: Text {
+                    x: label.x;
+                    y: label.y;
+                    text: label.text;
+                    visible: label.visible;
+                    color: label.accent ? #ffd166 : #e8f0f8;
+                    font-size: 12px;
+                    font-weight: 600;
+                }
+
+                // Forward viewport clicks (in image pixels) to the picker.
+                TouchArea {
+                    clicked => {
+                        root.viewport-clicked(self.mouse-x, self.mouse-y);
+                    }
+                }
+            }
+            Text {
+                text: root.status;
+                color: #7fd1ae;
+                font-size: 13px;
+                wrap: word-wrap;
+            }
+        }
+
+        // ---- Right: controls and live stats ---------------------------------
+        VerticalBox {
+            spacing: 10px;
+            min-width: 230px;
+
+            GroupBox {
+                title: "Camera";
+                GridBox {
+                    spacing: 6px;
+                    Row {
+                        Button { text: "◀ Orbit"; clicked => { root.orbit(-1); } }
+                        Button { text: "Orbit ▶"; clicked => { root.orbit(1); } }
+                    }
+                    Row {
+                        Button { text: "Tilt ▲"; clicked => { root.tilt(1); } }
+                        Button { text: "Tilt ▼"; clicked => { root.tilt(-1); } }
+                    }
+                    Row {
+                        Button { text: "Zoom +"; clicked => { root.zoom(1); } }
+                        Button { text: "Zoom −"; clicked => { root.zoom(-1); } }
+                    }
+                    Row {
+                        Button { text: "Reset view"; clicked => { root.reset-view(); } }
+                        Button { text: "Fly (timeline)"; clicked => { root.play-timeline(); } }
+                    }
+                }
+            }
+
+            GroupBox {
+                title: "Scene";
+                VerticalBox {
+                    spacing: 6px;
+                    Button {
+                        text: "Add primitive (" + root.primitive-kind + ")";
+                        clicked => { root.next-primitive(); }
+                    }
+                    Button { text: "Add labeled marker"; clicked => { root.add-marker(); } }
+                    Button {
+                        text: "Attention cue: " + root.attention-cue;
+                        clicked => { root.cycle-attention(); }
+                    }
+                    Button { text: "Particle burst"; clicked => { root.burst(); } }
+                    Button { text: "Spawn detection"; clicked => { root.spawn-detection(); } }
+                    CheckBox {
+                        text: "Auto-spin scene";
+                        toggled => { root.set-spin(self.checked); }
+                    }
+                }
+            }
+
+            GroupBox {
+                title: "Engine stats";
+                VerticalBox {
+                    spacing: 4px;
+                    for stat in root.stats: HorizontalBox {
+                        padding: 0px;
+                        Text { text: stat.label; color: #9fb3c8; font-size: 12px; }
+                        Rectangle { } // spacer
+                        Text { text: stat.value; color: #e8f0f8; font-size: 12px; font-weight: 600; }
+                    }
+                }
+            }
+
+            Rectangle { } // push everything up
+
+            Text {
+                text: "Last action: " + root.action;
+                color: #6b7a8d;
+                font-size: 11px;
+                wrap: word-wrap;
+            }
+        }
+    }
+}

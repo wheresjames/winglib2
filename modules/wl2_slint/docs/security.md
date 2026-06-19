@@ -44,8 +44,22 @@ Host filesystem paths are authorized with `Runtime::resolveFilesystemReadPath()`
 and confined to the configured read roots. Filesystem reads are denied by
 default.
 
+## Shared memory (FrameRing bridge)
+
+The 3D-in-UI consumer (`setImageFromFrameRing`) and the UI-on-3D producer
+(`renderOffscreenTo`/`injectPointer`/`injectKey`) cross the sandbox via libmembus
+shared memory, so both require `RuntimeOptions::allowSharedMemory` and a matching
+`sharedMemoryAllow` prefix; a name outside the allow-list is denied
+(`slint_permission_denied`). Frames read from a ring are treated as untrusted:
+width/height/stride/size and the RGBA32 format are validated before any copy into
+a `SharedPixelBuffer`, and only `RGBA32` rings are accepted. The producer writes
+RGBA8/sRGB/premultiplied/top-left frames (the shared pixel contract). Off-screen
+rendering opens no window and needs no `allowUi`; it is purely a shared-memory
+operation.
+
 ## Threading
 
 All interpreter and instance calls run on the JS/main thread; the module spawns
 no worker threads. This avoids cross-thread access to the QuickJS context and
-matches Slint's single-threaded UI requirement.
+matches Slint's single-threaded UI requirement. Off-screen rendering and event
+injection likewise run synchronously on the JS thread.

@@ -60,20 +60,20 @@ default builds. Slint is consumed as a **prebuilt C++ binary package** so no Rus
 toolchain is required:
 
 ```sh
-cmake -B build -DWL2_ENABLE_SLINT=ON -DWL2_FETCH_DEPS=ON \
+cmake -B build -DWL2_ENABLE_SLINT=ON -DWL2_DEPS_SLINT=download \
   -DWL2_SLINT_URL_HASH=SHA256=<hash-for-your-platform-package>
 ```
 
-See `cmake/options.cmake` for the full provider knobs
-(`WL2_SLINT_PROVIDER`, `WL2_SLINT_VERSION`, `WL2_SLINT_URL`, …). Building from
-source (`WL2_SLINT_PROVIDER=source`) is opt-in and is the only path that needs
-`cargo`.
+See `cmake/options.cmake` for the full dependency knobs
+(`WL2_DEPS_SLINT`, `WL2_SLINT_VERSION`, `WL2_SLINT_URL`, …). Building from
+source (`WL2_DEPS_SLINT=download -DWL2_SLINT_FROM_SOURCE=ON`) is opt-in and is
+the only path that needs `cargo`.
 
 Native dialogs are optional and use
 [`nativefiledialog-extended`](https://github.com/btzy/nativefiledialog-extended)
 when supported. `WL2_SLINT_NATIVE_DIALOGS=ON` is the default, but unsupported
 embedded targets or missing desktop prerequisites disable the feature in
-`auto`. Use `WL2_SLINT_NFD_PROVIDER=fetch|local|package|off` to force a provider.
+`auto`. Use `WL2_DEPS_SLINT_NFD=download|local|system|off` to force a mode.
 Linux fetch builds use NFDe portal mode and need `dbus-1` development files.
 
 ## Tests

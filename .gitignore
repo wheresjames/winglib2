@@ -1,7 +1,7 @@
 /.deps/
 /deps/
 /build/
-/build-wl2/
+/build-*/
 _*
 WINGLIB2-*
 WL2-*

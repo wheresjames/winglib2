@@ -1,6 +1,7 @@
 #include "wl2/runtime.h"
 
 #include <fstream>
+#include <iostream>
 #include <sstream>
 
 namespace wl2 {
@@ -42,6 +43,28 @@ bool endpoint_allowed(const std::vector<std::string>& allowList, std::string_vie
         }
     }
     return false;
+}
+
+bool prefix_allowed(const std::vector<std::string>& allowList, std::string_view value) {
+    for (const auto& entry : allowList) {
+        if (!entry.empty() && value.rfind(entry, 0) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool prompt_yes_no(const std::vector<std::string>& requested) {
+    std::cerr << "Script requests host permissions:\n";
+    for (const auto& item : requested) {
+        std::cerr << "  - " << item << '\n';
+    }
+    std::cerr << "Allow these and subsequent UI, graphics, and shared-memory requests for this run? [y/N] ";
+    std::string answer;
+    if (!std::getline(std::cin, answer)) {
+        return false;
+    }
+    return answer == "y" || answer == "Y" || answer == "yes" || answer == "YES";
 }
 
 } // namespace
@@ -90,9 +113,55 @@ Result<void> Runtime::authorizeNetworkListen(std::string_view host, uint16_t por
     return {};
 }
 
+bool Runtime::interactivePermissionAllowed(const std::vector<std::string>& requested) const {
+    if (!options_.interactivePermissions) {
+        return false;
+    }
+    if (interactivePermissionPrompted_) {
+        return interactivePermissionApproved_;
+    }
+    interactivePermissionPrompted_ = true;
+    interactivePermissionApproved_ = prompt_yes_no(requested);
+    return interactivePermissionApproved_;
+}
+
 Result<void> Runtime::authorizeUi() const {
+    if (options_.allowUi || interactivePermissionApproved_) {
+        return {};
+    }
+    if (interactivePermissionAllowed({"UI window access"})) {
+        return {};
+    }
     if (!options_.allowUi) {
         return Error("ui_denied", "Opening a window is not permitted by policy");
+    }
+    return {};
+}
+
+Result<void> Runtime::authorizeGraphics() const {
+    if (options_.allowGraphics || interactivePermissionApproved_) {
+        return {};
+    }
+    if (interactivePermissionAllowed({"graphics context access"})) {
+        return {};
+    }
+    if (!options_.allowGraphics) {
+        return Error("graphics_denied", "Creating a graphics context is not permitted by policy");
+    }
+    return {};
+}
+
+Result<void> Runtime::authorizeSharedMemory(std::string_view name) const {
+    if ((options_.allowSharedMemory && prefix_allowed(options_.sharedMemoryAllowList, name)) ||
+        interactivePermissionApproved_) {
+        return {};
+    }
+    if (interactivePermissionAllowed({"shared-memory object " + std::string(name)})) {
+        return {};
+    }
+    if (!options_.allowSharedMemory || !prefix_allowed(options_.sharedMemoryAllowList, name)) {
+        return Error("shared_memory_denied",
+            "Shared-memory object " + std::string(name) + " is not permitted by policy");
     }
     return {};
 }

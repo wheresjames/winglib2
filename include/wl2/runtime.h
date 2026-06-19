@@ -122,6 +122,24 @@ struct RuntimeOptions {
     /// window is a host-resource action like network or filesystem access;
     /// compiling and instantiating a UI component does not require it.
     bool allowUi = false;
+
+    /// Allow modules to create native graphics contexts, including headless EGL
+    /// contexts. Disabled by default because GPU/context creation is a host
+    /// resource independent of opening a visible UI.
+    bool allowGraphics = false;
+
+    /// Allow modules to create or attach named shared-memory objects. Disabled
+    /// by default because named shared memory is a cross-process channel.
+    bool allowSharedMemory = false;
+
+    /// Name prefixes a shared-memory object may use when allowSharedMemory is
+    /// true. Entries are matched by string prefix. An empty list denies all
+    /// names even when allowSharedMemory is true.
+    std::vector<std::string> sharedMemoryAllowList;
+
+    /// Allow denied capability checks to prompt on the console when the host CLI
+    /// is interactive. Disabled by embedders unless explicitly requested.
+    bool interactivePermissions = false;
 };
 
 /**
@@ -258,6 +276,29 @@ public:
     Result<void> authorizeUi() const;
 
     /**
+     * @brief Authorize native graphics context creation against policy.
+     *
+     * Graphics access is denied by default. It is permitted only when
+     * RuntimeOptions::allowGraphics is set.
+     *
+     * @return Success when permitted, or an Error with code `graphics_denied`.
+     */
+    Result<void> authorizeGraphics() const;
+
+    /**
+     * @brief Authorize named shared-memory access against policy.
+     *
+     * Shared-memory access is denied by default. It is permitted only when
+     * RuntimeOptions::allowSharedMemory is set and @p name starts with one of
+     * RuntimeOptions::sharedMemoryAllowList.
+     *
+     * @param name Shared-memory object name requested by a module.
+     * @return Success when permitted, or an Error with code
+     * `shared_memory_denied`.
+     */
+    Result<void> authorizeSharedMemory(std::string_view name) const;
+
+    /**
      * @brief Shared host support for native asynchronous module work.
      * @return Mutable async host owned by the runtime.
      */
@@ -298,6 +339,8 @@ public:
     Result<std::string> loadTextResource(std::string specifier) const;
 
 private:
+    bool interactivePermissionAllowed(const std::vector<std::string>& requested) const;
+
     RuntimeOptions options_;
     ResourceStore resources_;
     ModuleLoader modules_;
@@ -309,6 +352,8 @@ private:
     // dependencies are still alive.
     ThreadTree threadTree_;
     bool initialized_ = false;
+    mutable bool interactivePermissionPrompted_ = false;
+    mutable bool interactivePermissionApproved_ = false;
 };
 
 } // namespace wl2

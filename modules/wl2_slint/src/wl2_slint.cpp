@@ -10,8 +10,11 @@
 // run on the JS/main thread; this module spawns no worker threads.
 #include "wl2_slint/wl2_slint.h"
 
+#include "wl2/membus.h"
 #include "wl2/runtime.h"
 
+#include <cstdint>
+#include <cstring>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -31,6 +34,7 @@
 #include <span>
 #include <sstream>
 
+#include "slint_offscreen.h"
 #include "slint_runtime.h"
 #include "value_bridge.h"
 
@@ -57,6 +61,7 @@ Functions:
   openFilesDialog(options) -> Promise<string[]|null>    show a native multi-open dialog
   saveFileDialog(options) -> Promise<string|null>       show a native save-file dialog
   pickFolderDialog(options) -> Promise<string|null>     show a native folder dialog
+  useOffscreenRendering() -> true                       select the headless platform (before compile/create)
 
 Component:
   create() -> Instance                                 instantiate the component
@@ -66,14 +71,21 @@ Component:
 Instance:
   get(property) -> value                                read an in/in-out property
   set(property, value)                                  set an in/in-out property
+  setImageFromFrameRing(property, name[, options]) -> metadata
+                                                        copy an RGBA memvid frame into an image property
   on(callback, fn)                                      register a JS handler for a callback
   invoke(callback, ...args) -> value                    call a component callback
   colorScheme() -> "unknown"|"dark"|"light"             query the active widget style scheme
   show() / hide()                                       open/close the window (requires the UI capability)
+  renderOffscreenTo(name, { size }) -> metadata         software-render to a FrameRing (requires shared memory)
+  renderOffscreenFrame() -> metadata                    re-render the bound off-screen target
+  injectPointer(x, y, phase[, button]) -> metadata      dispatch a synthetic pointer event + re-render
+  injectKey(text[, phase]) -> metadata                  dispatch a synthetic key event + re-render
 
 Value marshaling: number, string, bool, one-level objects (JS object <-> Slint
-struct), arrays (JS array <-> Slint model), and brush/color properties as CSS
-hex strings ("#rrggbb"/"#rrggbbaa"). Images are a follow-up.
+struct), arrays (JS array <-> Slint model), brush/color properties as CSS hex
+strings ("#rrggbb"/"#rrggbbaa"), and explicit RGBA FrameRing-to-image copies via
+setImageFromFrameRing().
 
 Event loop: run() blocks until the last window closes or quit() is called; a
 timer pumps host async work so other modules' promises keep settling.
@@ -108,12 +120,24 @@ struct CallbackData {
     std::set<std::string> registered;  // callback names already wired to Slint
 };
 
+// Off-screen render target (UI-on-3D producer): a SoftwareRenderer-backed
+// window adapter writing RGBA8 frames into a FrameRing. Null until the instance
+// is bound with renderOffscreenTo().
+struct OffscreenTarget {
+    wl2_slint_offscreen::OffscreenWindowAdapter* adapter = nullptr;  // owned by Slint
+    wl2::VideoBuffer ring;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    std::vector<slint::Rgb8Pixel> scratch;
+};
+
 // A live component instance plus a keepalive on the compiled component and the
 // JS callback registry.
 struct InstanceState {
     std::shared_ptr<CompiledComponent> component;
     slint::ComponentHandle<slint::interpreter::ComponentInstance> instance;
     std::shared_ptr<CallbackData> callbacks;
+    std::shared_ptr<OffscreenTarget> offscreen;  // null until bound
 };
 
 JSClassID component_class_id = 0;
@@ -445,6 +469,19 @@ JSValue authorize_dialog(JSContext* ctx, const char* operation) {
             ok.error().code() + ": " + ok.error().message());
     }
     return JS_UNDEFINED;
+}
+
+bool js_to_std_string(JSContext* ctx, JSValueConst value, std::string& out) {
+    if (!JS_IsString(value)) {
+        return false;
+    }
+    const char* text = JS_ToCString(ctx, value);
+    if (!text) {
+        return false;
+    }
+    out = text;
+    JS_FreeCString(ctx, text);
+    return true;
 }
 
 #if WL2_SLINT_HAVE_NATIVE_DIALOGS
@@ -919,6 +956,382 @@ JSValue instance_set(JSContext* ctx, JSValueConst thisVal, int argc, JSValueCons
     return JS_UNDEFINED;
 }
 
+JSValue instance_set_image_from_frame_ring(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv) {
+    auto instance = get_instance(ctx, thisVal);
+    if (!instance) {
+        return JS_ThrowTypeError(ctx, "setImageFromFrameRing() called on a non-instance");
+    }
+    if (argc < 2) {
+        return JS_Throw(ctx,
+            make_error(ctx, SlintErr::InvalidArgument, "setImageFromFrameRing", "property and shared-memory name are required"));
+    }
+
+    std::string property;
+    if (!js_to_std_string(ctx, argv[0], property)) {
+        return JS_Throw(ctx,
+            make_error(ctx, SlintErr::InvalidArgument, "setImageFromFrameRing", "could not read property name"));
+    }
+    std::string name;
+    if (!js_to_std_string(ctx, argv[1], name)) {
+        return JS_Throw(ctx,
+            make_error(ctx, SlintErr::InvalidArgument, "setImageFromFrameRing", "could not read shared-memory name"));
+    }
+
+    int64_t lastSequence = -1;
+    if (argc >= 3 && JS_IsObject(argv[2])) {
+        JSValue last = JS_GetPropertyStr(ctx, argv[2], "lastSequence");
+        if (!JS_IsUndefined(last) && !JS_IsNull(last)) {
+            JS_ToInt64(ctx, &lastSequence, last);
+        }
+        JS_FreeValue(ctx, last);
+    }
+
+    auto* runtime = static_cast<wl2::Runtime*>(JS_GetContextOpaque(ctx));
+    if (!runtime) {
+        return JS_Throw(ctx,
+            make_error(ctx, SlintErr::PermissionDenied, "setImageFromFrameRing", "shared-memory access is not permitted without a runtime policy"));
+    }
+    if (auto allowed = runtime->authorizeSharedMemory(name); !allowed) {
+        return JS_Throw(ctx,
+            make_error(ctx, SlintErr::PermissionDenied, "setImageFromFrameRing", allowed.error().message()));
+    }
+
+    auto opened = wl2::VideoBuffer::openExisting(name);
+    if (!opened) {
+        return JS_Throw(ctx,
+            make_error(ctx, SlintErr::InvalidArgument, "setImageFromFrameRing", opened.error().message(), "", property));
+    }
+    auto video = std::move(opened.value());
+    const int64_t sequence = video.sequence();
+    if (lastSequence >= 0 && sequence <= lastSequence) {
+        JSValue out = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, out, "updated", JS_NewBool(ctx, false));
+        JS_SetPropertyStr(ctx, out, "sequence", JS_NewInt64(ctx, sequence));
+        video.close();
+        return out;
+    }
+
+    const auto format = video.format();
+    if (!format || *format != wl2::VideoPixelFormat::Rgba32) {
+        video.close();
+        return JS_Throw(ctx,
+            make_error(ctx, SlintErr::Unsupported, "setImageFromFrameRing", "only RGBA32 FrameRing images are supported", "", property));
+    }
+    auto frame = video.frame(0);
+    if (!frame) {
+        video.close();
+        return JS_Throw(ctx,
+            make_error(ctx, SlintErr::InvalidArgument, "setImageFromFrameRing", frame.error().message(), "", property));
+    }
+    if (!frame.value().data || frame.value().width <= 0 || frame.value().height <= 0 ||
+        frame.value().width > UINT32_MAX || frame.value().height > UINT32_MAX ||
+        frame.value().scanWidth < frame.value().width * 4 ||
+        frame.value().size < static_cast<size_t>(frame.value().scanWidth * frame.value().height)) {
+        video.close();
+        return JS_Throw(ctx,
+            make_error(ctx, SlintErr::InvalidArgument, "setImageFromFrameRing", "FrameRing returned invalid RGBA frame metadata", "", property));
+    }
+
+    slint::SharedPixelBuffer<slint::Rgba8Pixel> pixels{
+        static_cast<uint32_t>(frame.value().width),
+        static_cast<uint32_t>(frame.value().height)};
+    auto* dest = reinterpret_cast<unsigned char*>(pixels.begin());
+    const auto* source = reinterpret_cast<const unsigned char*>(frame.value().data);
+    const auto rowBytes = static_cast<size_t>(frame.value().width * 4);
+    for (int64_t y = 0; y < frame.value().height; ++y) {
+        std::memcpy(dest + static_cast<size_t>(y) * rowBytes,
+            source + static_cast<size_t>(y * frame.value().scanWidth),
+            rowBytes);
+    }
+
+    slint::interpreter::Value value{slint::Image{pixels}};
+    if (!instance->instance->set_property(std::string_view(property), value)) {
+        video.close();
+        return JS_Throw(ctx,
+            make_error(ctx, SlintErr::UnknownProperty, "setImageFromFrameRing",
+                "no such image property, or property is not assignable from an image", "", property));
+    }
+
+    JSValue out = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, out, "updated", JS_NewBool(ctx, true));
+    JS_SetPropertyStr(ctx, out, "width", JS_NewInt64(ctx, frame.value().width));
+    JS_SetPropertyStr(ctx, out, "height", JS_NewInt64(ctx, frame.value().height));
+    JS_SetPropertyStr(ctx, out, "stride", JS_NewInt64(ctx, frame.value().scanWidth));
+    JS_SetPropertyStr(ctx, out, "sequence", JS_NewInt64(ctx, sequence));
+    JS_SetPropertyStr(ctx, out, "format", JS_NewString(ctx, "rgba8"));
+    JS_SetPropertyStr(ctx, out, "origin", JS_NewString(ctx, "top-left"));
+    video.close();
+    return out;
+}
+
+// --- Off-screen rendering (UI-on-3D producer) ---------------------------------
+
+// Select the headless off-screen platform for this process. Slint's platform is
+// process-global and one-shot, so this must be called before compile()/create()
+// and is mutually exclusive with the windowed backend (Component.run()/show()).
+JSValue slint_use_offscreen_rendering(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv) {
+    (void)thisVal;
+    (void)argc;
+    (void)argv;
+    if (!wl2_slint_offscreen::ensure_offscreen_platform()) {
+        return JS_Throw(ctx,
+            make_error(ctx, SlintErr::Unsupported, "useOffscreenRendering",
+                "off-screen platform could not be installed (a windowed UI is already active in this process)"));
+    }
+    return JS_NewBool(ctx, true);
+}
+
+slint::PointerEventButton parse_pointer_button(const std::string& name) {
+    if (name == "right") return slint::PointerEventButton::Right;
+    if (name == "middle") return slint::PointerEventButton::Middle;
+    return slint::PointerEventButton::Left;
+}
+
+// Render the bound component into its FrameRing slot (RGB8 -> RGBA8, top-left
+// origin, opaque/premultiplied) and advance the ring. Returns an exception on
+// failure, JS_UNDEFINED on success (with the new sequence in *outSeq).
+JSValue offscreen_publish(JSContext* ctx, OffscreenTarget& target, const char* op, int64_t* outSeq) {
+    slint::platform::update_timers_and_animations();
+    const size_t count = static_cast<size_t>(target.width) * target.height;
+    if (target.scratch.size() != count) {
+        target.scratch.assign(count, slint::Rgb8Pixel{0, 0, 0});
+    }
+    target.adapter->software_renderer().render(
+        std::span<slint::Rgb8Pixel>(target.scratch.data(), count), target.width);
+
+    auto frame = target.ring.frame(0);
+    if (!frame) {
+        return JS_Throw(ctx, make_error(ctx, SlintErr::InvalidArgument, op, frame.error().message()));
+    }
+    auto& f = frame.value();
+    if (!f.data || f.scanWidth < static_cast<int64_t>(target.width) * 4) {
+        return JS_Throw(ctx,
+            make_error(ctx, SlintErr::InvalidArgument, op, "FrameRing returned an invalid RGBA frame"));
+    }
+    auto* dst = reinterpret_cast<unsigned char*>(f.data);
+    const slint::Rgb8Pixel* src = target.scratch.data();
+    for (uint32_t y = 0; y < target.height; ++y) {
+        unsigned char* row = dst + static_cast<size_t>(y) * f.scanWidth;
+        const slint::Rgb8Pixel* srow = src + static_cast<size_t>(y) * target.width;
+        for (uint32_t x = 0; x < target.width; ++x) {
+            row[x * 4 + 0] = srow[x].r;
+            row[x * 4 + 1] = srow[x].g;
+            row[x * 4 + 2] = srow[x].b;
+            row[x * 4 + 3] = 255;
+        }
+    }
+    target.ring.next(1);
+    if (outSeq) {
+        *outSeq = target.ring.sequence();
+    }
+    return JS_UNDEFINED;
+}
+
+JSValue offscreen_metadata(JSContext* ctx, OffscreenTarget& target, int64_t seq) {
+    JSValue out = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, out, "updated", JS_NewBool(ctx, true));
+    JS_SetPropertyStr(ctx, out, "width", JS_NewInt64(ctx, target.width));
+    JS_SetPropertyStr(ctx, out, "height", JS_NewInt64(ctx, target.height));
+    JS_SetPropertyStr(ctx, out, "sequence", JS_NewInt64(ctx, seq));
+    JS_SetPropertyStr(ctx, out, "format", JS_NewString(ctx, "rgba8"));
+    JS_SetPropertyStr(ctx, out, "origin", JS_NewString(ctx, "top-left"));
+    JS_SetPropertyStr(ctx, out, "alpha", JS_NewString(ctx, "premultiplied"));
+    return out;
+}
+
+JSValue instance_render_offscreen_to(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv) {
+    auto instance = get_instance(ctx, thisVal);
+    if (!instance) {
+        return JS_ThrowTypeError(ctx, "renderOffscreenTo() called on a non-instance");
+    }
+    const char* op = "renderOffscreenTo";
+    if (argc < 1) {
+        return JS_Throw(ctx, make_error(ctx, SlintErr::InvalidArgument, op, "shared-memory name is required"));
+    }
+    std::string name;
+    if (!js_to_std_string(ctx, argv[0], name)) {
+        return JS_Throw(ctx, make_error(ctx, SlintErr::InvalidArgument, op, "could not read shared-memory name"));
+    }
+    int64_t width = 0;
+    int64_t height = 0;
+    if (argc >= 2 && JS_IsObject(argv[1])) {
+        JSValue size = JS_GetPropertyStr(ctx, argv[1], "size");
+        if (JS_IsArray(ctx, size) > 0) {
+            JSValue w = JS_GetPropertyUint32(ctx, size, 0);
+            JSValue h = JS_GetPropertyUint32(ctx, size, 1);
+            JS_ToInt64(ctx, &width, w);
+            JS_ToInt64(ctx, &height, h);
+            JS_FreeValue(ctx, w);
+            JS_FreeValue(ctx, h);
+        }
+        JS_FreeValue(ctx, size);
+    }
+    if (width <= 0 || height <= 0 || width > 16384 || height > 16384) {
+        return JS_Throw(ctx,
+            make_error(ctx, SlintErr::InvalidArgument, op, "options.size = [width, height] is required"));
+    }
+
+    auto* runtime = static_cast<wl2::Runtime*>(JS_GetContextOpaque(ctx));
+    if (!runtime) {
+        return JS_Throw(ctx,
+            make_error(ctx, SlintErr::PermissionDenied, op, "shared-memory access is not permitted without a runtime policy"));
+    }
+    if (auto allowed = runtime->authorizeSharedMemory(name); !allowed) {
+        return JS_Throw(ctx, make_error(ctx, SlintErr::PermissionDenied, op, allowed.error().message()));
+    }
+
+    auto& reg = wl2_slint_offscreen::registry();
+    if (!reg.installed) {
+        return JS_Throw(ctx,
+            make_error(ctx, SlintErr::Unsupported, op,
+                "call useOffscreenRendering() before compile()/create() to enable off-screen UI-on-3D"));
+    }
+    reg.pendingWidth = static_cast<uint32_t>(width);
+    reg.pendingHeight = static_cast<uint32_t>(height);
+    reg.lastAdapter = nullptr;
+
+    // Touching window() lazily creates the WindowAdapter through our platform.
+    // window() is const but the dispatch_*/resize entry points are non-const;
+    // slint::Window is a refcounted handle, so const_cast is the idiomatic path.
+    slint::Window& window = const_cast<slint::Window&>(instance->instance->window());
+    wl2_slint_offscreen::OffscreenWindowAdapter* adapter = reg.lastAdapter;
+    if (!adapter) {
+        return JS_Throw(ctx,
+            make_error(ctx, SlintErr::Unsupported, op,
+                "off-screen window adapter was not created (was the instance already shown?)"));
+    }
+    window.dispatch_resize_event(
+        slint::LogicalSize({static_cast<float>(width), static_cast<float>(height)}));
+
+    auto created = wl2::VideoBuffer::create(name, width, height, wl2::VideoPixelFormat::Rgba32, 30, 3);
+    if (!created) {
+        return JS_Throw(ctx, make_error(ctx, SlintErr::InvalidArgument, op, created.error().message()));
+    }
+    auto target = std::make_shared<OffscreenTarget>();
+    target->adapter = adapter;
+    target->ring = std::move(created.value());
+    target->width = static_cast<uint32_t>(width);
+    target->height = static_cast<uint32_t>(height);
+    instance->offscreen = target;
+
+    int64_t seq = 0;
+    JSValue err = offscreen_publish(ctx, *target, op, &seq);
+    if (JS_IsException(err)) {
+        instance->offscreen.reset();
+        return err;
+    }
+    return offscreen_metadata(ctx, *target, seq);
+}
+
+JSValue instance_render_offscreen_frame(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv) {
+    (void)argc;
+    (void)argv;
+    auto instance = get_instance(ctx, thisVal);
+    if (!instance) {
+        return JS_ThrowTypeError(ctx, "renderOffscreenFrame() called on a non-instance");
+    }
+    if (!instance->offscreen) {
+        return JS_Throw(ctx,
+            make_error(ctx, SlintErr::InvalidArgument, "renderOffscreenFrame", "instance is not bound to an off-screen target"));
+    }
+    int64_t seq = 0;
+    JSValue err = offscreen_publish(ctx, *instance->offscreen, "renderOffscreenFrame", &seq);
+    if (JS_IsException(err)) {
+        return err;
+    }
+    return offscreen_metadata(ctx, *instance->offscreen, seq);
+}
+
+JSValue instance_inject_pointer(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv) {
+    auto instance = get_instance(ctx, thisVal);
+    if (!instance) {
+        return JS_ThrowTypeError(ctx, "injectPointer() called on a non-instance");
+    }
+    const char* op = "injectPointer";
+    if (!instance->offscreen) {
+        return JS_Throw(ctx,
+            make_error(ctx, SlintErr::InvalidArgument, op, "instance is not bound to an off-screen target"));
+    }
+    if (argc < 3) {
+        return JS_Throw(ctx,
+            make_error(ctx, SlintErr::InvalidArgument, op, "injectPointer(x, y, phase[, button]) requires x, y and a phase"));
+    }
+    double x = 0;
+    double y = 0;
+    if (JS_ToFloat64(ctx, &x, argv[0]) != 0 || JS_ToFloat64(ctx, &y, argv[1]) != 0) {
+        return JS_Throw(ctx, make_error(ctx, SlintErr::InvalidArgument, op, "x and y must be numbers"));
+    }
+    std::string phase;
+    js_to_std_string(ctx, argv[2], phase);
+    std::string buttonName = "left";
+    if (argc >= 4 && JS_IsString(argv[3])) {
+        js_to_std_string(ctx, argv[3], buttonName);
+    }
+    const slint::PointerEventButton button = parse_pointer_button(buttonName);
+    slint::LogicalPosition pos({static_cast<float>(x), static_cast<float>(y)});
+    slint::Window& window = const_cast<slint::Window&>(instance->instance->window());
+    if (phase == "press") {
+        window.dispatch_pointer_press_event(pos, button);
+    } else if (phase == "release") {
+        window.dispatch_pointer_release_event(pos, button);
+    } else if (phase == "move") {
+        window.dispatch_pointer_move_event(pos);
+    } else if (phase == "click") {
+        window.dispatch_pointer_press_event(pos, button);
+        window.dispatch_pointer_release_event(pos, button);
+    } else {
+        return JS_Throw(ctx,
+            make_error(ctx, SlintErr::InvalidArgument, op, "phase must be press, release, move, or click"));
+    }
+    int64_t seq = 0;
+    JSValue err = offscreen_publish(ctx, *instance->offscreen, op, &seq);
+    if (JS_IsException(err)) {
+        return err;
+    }
+    return offscreen_metadata(ctx, *instance->offscreen, seq);
+}
+
+JSValue instance_inject_key(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv) {
+    auto instance = get_instance(ctx, thisVal);
+    if (!instance) {
+        return JS_ThrowTypeError(ctx, "injectKey() called on a non-instance");
+    }
+    const char* op = "injectKey";
+    if (!instance->offscreen) {
+        return JS_Throw(ctx,
+            make_error(ctx, SlintErr::InvalidArgument, op, "instance is not bound to an off-screen target"));
+    }
+    if (argc < 1) {
+        return JS_Throw(ctx,
+            make_error(ctx, SlintErr::InvalidArgument, op, "injectKey(text[, phase]) requires text"));
+    }
+    std::string text;
+    js_to_std_string(ctx, argv[0], text);
+    std::string phase = "click";
+    if (argc >= 2 && JS_IsString(argv[1])) {
+        js_to_std_string(ctx, argv[1], phase);
+    }
+    slint::Window& window = const_cast<slint::Window&>(instance->instance->window());
+    const slint::SharedString shared{text};
+    if (phase == "press") {
+        window.dispatch_key_press_event(shared);
+    } else if (phase == "release") {
+        window.dispatch_key_release_event(shared);
+    } else if (phase == "click") {
+        window.dispatch_key_press_event(shared);
+        window.dispatch_key_release_event(shared);
+    } else {
+        return JS_Throw(ctx,
+            make_error(ctx, SlintErr::InvalidArgument, op, "phase must be press, release, or click"));
+    }
+    int64_t seq = 0;
+    JSValue err = offscreen_publish(ctx, *instance->offscreen, op, &seq);
+    if (JS_IsException(err)) {
+        return err;
+    }
+    return offscreen_metadata(ctx, *instance->offscreen, seq);
+}
+
 // --- Instance.on() / invoke() --------------------------------------------------
 
 // The Slint closure registered for a callback. Captures only a weak reference to
@@ -1197,6 +1610,11 @@ void register_instance_class(JSContext* ctx) {
     JSValue proto = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, proto, "get", JS_NewCFunction(ctx, instance_get, "get", 1));
     JS_SetPropertyStr(ctx, proto, "set", JS_NewCFunction(ctx, instance_set, "set", 2));
+    JS_SetPropertyStr(ctx, proto, "setImageFromFrameRing", JS_NewCFunction(ctx, instance_set_image_from_frame_ring, "setImageFromFrameRing", 2));
+    JS_SetPropertyStr(ctx, proto, "renderOffscreenTo", JS_NewCFunction(ctx, instance_render_offscreen_to, "renderOffscreenTo", 2));
+    JS_SetPropertyStr(ctx, proto, "renderOffscreenFrame", JS_NewCFunction(ctx, instance_render_offscreen_frame, "renderOffscreenFrame", 0));
+    JS_SetPropertyStr(ctx, proto, "injectPointer", JS_NewCFunction(ctx, instance_inject_pointer, "injectPointer", 4));
+    JS_SetPropertyStr(ctx, proto, "injectKey", JS_NewCFunction(ctx, instance_inject_key, "injectKey", 2));
     JS_SetPropertyStr(ctx, proto, "on", JS_NewCFunction(ctx, instance_on, "on", 2));
     JS_SetPropertyStr(ctx, proto, "invoke", JS_NewCFunction(ctx, instance_invoke, "invoke", 1));
     JS_SetPropertyStr(ctx, proto, "colorScheme", JS_NewCFunction(ctx, instance_color_scheme, "colorScheme", 0));
@@ -1219,6 +1637,8 @@ int init_slint_module(JSContext* ctx, JSModuleDef* module) {
         JS_NewCFunction(ctx, save_file_dialog, "saveFileDialog", 1));
     JS_SetModuleExport(ctx, module, "pickFolderDialog",
         JS_NewCFunction(ctx, pick_folder_dialog, "pickFolderDialog", 1));
+    JS_SetModuleExport(ctx, module, "useOffscreenRendering",
+        JS_NewCFunction(ctx, slint_use_offscreen_rendering, "useOffscreenRendering", 0));
     return 0;
 }
 
@@ -1263,6 +1683,7 @@ extern "C" void* wl2_slint_quickjs_module_factory(void* context, const char* mod
     JS_AddModuleExport(ctx, module, "openFilesDialog");
     JS_AddModuleExport(ctx, module, "saveFileDialog");
     JS_AddModuleExport(ctx, module, "pickFolderDialog");
+    JS_AddModuleExport(ctx, module, "useOffscreenRendering");
     return module;
 #else
     (void)context;

@@ -31,7 +31,7 @@ is described in [`docs/design.md`](docs/design.md).
 
 The module is gated behind `WL2_ENABLE_ASIO` (default `OFF`). When enabled it
 discovers or fetches standalone Asio via `cmake/WL2Asio.cmake`
-(`WL2_ASIO_PROVIDER=auto|local|package|fetch|off`):
+(`WL2_DEPS_ASIO=auto|local|system|download|off`):
 
 ```sh
 cmake -S . -B build -DWL2_ENABLE_ASIO=ON

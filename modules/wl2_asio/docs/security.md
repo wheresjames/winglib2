@@ -13,7 +13,7 @@ From the CLI (`wl2 run`):
 | ----------------------------- | ----------------------------------------------- |
 | `--allow-network`             | Enable outbound connects (subject to the list). |
 | `--network-allow host[:port]` | Add an allow-list entry (implies the above).    |
-| `--allow-listen`              | Enable listeners (used by the Phase 2 server).  |
+| `--allow-listen`              | Enable listeners (used by the TCP server).      |
 | `--listen-allow host[:port]`  | Add a listen allow-list entry.                  |
 
 Embedders set the equivalent `RuntimeOptions` fields (`allowNetwork`,

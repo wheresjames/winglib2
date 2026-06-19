@@ -24,7 +24,7 @@ The module is gated behind `WL2_ENABLE_SLINT` (default **OFF**) and links into t
 ## Quick start
 
 ```sh
-cmake -S . -B build -DWL2_ENABLE_SLINT=ON -DWL2_FETCH_DEPS=ON
+cmake -S . -B build -DWL2_ENABLE_SLINT=ON -DWL2_DEPS_SLINT=download
 cmake --build build
 build/app/wl2/wl2 run --allow-ui app.js
 ```
@@ -63,8 +63,9 @@ Images remain a follow-up.
 ## Dependency provider
 
 Slint is consumed as a **prebuilt C++ binary package** (no Rust toolchain) through
-`WL2_SLINT_PROVIDER` (`auto|local|package|fetch|source|off`); only the opt-in
-`source` provider needs `cargo`. See [dependencies.md](dependencies.md).
+`WL2_DEPS_SLINT` (`auto|local|system|download|off`). Set
+`WL2_SLINT_FROM_SOURCE=ON` with `WL2_DEPS_SLINT=download` to build from source;
+that path needs `cargo`. See [dependencies.md](dependencies.md).
 
 ## Tests
 

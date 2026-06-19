@@ -21,14 +21,20 @@ if(WL2_BUILD_TESTING AND WL2_HAVE_MEMBUS_EXAMPLE_TARGET)
     add_test(NAME examples.js.membus_queue
         COMMAND
             $<TARGET_FILE:${WL2_EXE_TARGET}>
+            --allow-shared-memory
+            --shared-memory-allow /wl2_example_queue_
             ${CMAKE_CURRENT_SOURCE_DIR}/membus_queue.js)
     add_test(NAME examples.js.membus_kv
         COMMAND
             $<TARGET_FILE:${WL2_EXE_TARGET}>
+            --allow-shared-memory
+            --shared-memory-allow /wl2_example_kv_
             ${CMAKE_CURRENT_SOURCE_DIR}/membus_kv.js)
     add_test(NAME examples.js.membus_video
         COMMAND
             $<TARGET_FILE:${WL2_EXE_TARGET}>
+            --allow-shared-memory
+            --shared-memory-allow /wl2_example_video_
             ${CMAKE_CURRENT_SOURCE_DIR}/membus_video.js)
     add_test(NAME examples.js.membus_select
         COMMAND

@@ -9,10 +9,9 @@ set(winglib2_WL2_RESOURCES_MODULE "${CMAKE_CURRENT_LIST_DIR}/WL2Resources.cmake"
 
 include("${CMAKE_CURRENT_LIST_DIR}/WL2TargetPath.cmake")
 wl2_configure_dependency_root()
+set(WL2_DEPS system CACHE STRING "Default dependency mode: auto, local, system, download, or off")
 include("${CMAKE_CURRENT_LIST_DIR}/WL2Options.cmake")
-set(WL2_FETCH_DEPS OFF CACHE BOOL "Download and build missing Winglib2 dependencies locally" FORCE)
 wl2_configure_dependency_options()
-include("${CMAKE_CURRENT_LIST_DIR}/deps/WL2Dependency.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/deps/WL2QuickJS.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/deps/WL2V8.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/deps/WL2Libmembus.cmake")

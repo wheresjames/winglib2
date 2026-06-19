@@ -43,6 +43,8 @@ if(WL2_BUILD_TESTING)
         add_test(NAME examples.thread_tree.membus_worker
             COMMAND
                 $<TARGET_FILE:${WL2_EXE_TARGET}>
+                --allow-shared-memory
+                --shared-memory-allow /wl2_thread_tree_example
                 ${CMAKE_CURRENT_SOURCE_DIR}/membus-worker.js)
         set_tests_properties(examples.thread_tree.membus_worker PROPERTIES
             LABELS "examples;js;thread;membus;integration"

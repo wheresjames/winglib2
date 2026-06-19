@@ -76,6 +76,19 @@ cmake --build winglib2/build
 
 (No Ninja? Drop `-G Ninja` and CMake uses its default generator.)
 
+To build every in-tree module from a fresh checkout and download the pinned
+dependencies instead of using system packages:
+
+```sh
+cmake -S winglib2 -B winglib2/build -G Ninja \
+  -DWL2_DEPS=download \
+  -DWL2_ENABLE_ALL_MODULES=ON
+cmake --build winglib2/build
+```
+
+This uses the default QuickJS engine. V8 still requires a separate local V8
+install and is not part of the all-dependencies download path.
+
 **2. Run a script.** This runs one of the bundled examples:
 
 ```sh
@@ -221,7 +234,7 @@ ship their own metadata so missing critical fields fail during configure.
 
 ## Dependencies
 
-> **In short:** Winglib2 fetches and builds its own dependencies into a local,
+> **In short:** Winglib2 downloads and builds its own dependencies into a local,
 > per-target folder, so your system stays clean and cross-builds stay
 > reproducible.
 
@@ -232,19 +245,21 @@ winglib2/.deps/<system>-<arch>/<build-type>
 # e.g. winglib2/.deps/linux-x86_64/debug/quickjs
 ```
 
-QuickJS is fetched and built locally when missing (the default, controlled by
-`WL2_FETCH_DEPS=ON`). Each dependency follows the same provider pattern — `auto`,
-`local`, `package`, `fetch`, or `off` — where `auto` prefers the local root and
-refuses to silently fall back to system packages while cross-compiling.
+QuickJS is downloaded and built locally when missing. Dependencies follow one
+mode vocabulary: `auto`, `local`, `system`, `download`, or `off`. `auto` prefers
+the local root, then pinned downloads, and refuses to silently fall back to
+system packages while cross-compiling.
 
 The most useful configure options:
 
 ```sh
 -DWL2_JS_ENGINE=quickjs        # default engine
 -DWL2_JS_ENGINE=v8             # optional V8 backend
--DWL2_FETCH_DEPS=ON            # default: fetch missing deps where supported
--DWL2_QUICKJS_PROVIDER=auto    # auto, local, package, fetch, off
--DWL2_CURL_PROVIDER=auto       # auto, local, package, fetch, off
+-DWL2_DEPS=auto                # global dependency mode
+-DWL2_DEPS=download            # strict pinned local dependency build
+-DWL2_DEPS_QUICKJS=download    # force one dependency
+-DWL2_DEPS_CURL=system         # local, system, download, off, or auto
+-DWL2_ENABLE_ALL_MODULES=ON    # build every discovered in-tree module
 -DWL2_BUILD_SHARED_MODULES=OFF # default; dynamic module loading is experimental
 -DWL2_ENABLE_STRESS_TESTS=OFF  # default; opt in to stress CTest entries
 -DWL2_ENABLE_LIBMEMBUS=ON      # default
@@ -261,7 +276,7 @@ Defaults are centralized in `cmake/WL2Options.cmake`. See
 ### QuickJS (default)
 
 QuickJS is small, builds statically, and fits the project's cross-build goals. If
-it's missing, CMake fetches and builds it for you:
+it's missing, CMake downloads and builds it for you:
 
 ```sh
 cmake -S winglib2 -B winglib2/build -DWL2_JS_ENGINE=quickjs
@@ -771,7 +786,7 @@ winglib2/
 - [docs/testing.md](docs/testing.md) — the test API and `wl2 init` / `wl2 module
   new` scaffolds.
 - [docs/apps.md](docs/apps.md) — app install/uninstall, scopes, and launchers.
-- [docs/dependencies.md](docs/dependencies.md) — the dependency/provider model.
+- [docs/dependencies.md](docs/dependencies.md) — the dependency mode model.
 - [docs/resources-javascript.md](docs/resources-javascript.md) and
   [docs/resources-executable.md](docs/resources-executable.md) — resources from
   JavaScript and inside executables.
@@ -800,7 +815,7 @@ rather than the default embedded path. A future-style cross configure looks like
 cmake -S winglib2 -B build-arm -G Ninja \
   -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/arm-linux.cmake \
   -DWL2_JS_ENGINE=quickjs \
-  -DWL2_QUICKJS_PROVIDER=fetch
+  -DWL2_DEPS_QUICKJS=download
 ```
 
 **Known limitations** (this is still a prototype):

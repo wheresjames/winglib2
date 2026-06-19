@@ -24,10 +24,12 @@ function(wl2_configure_dependency_root)
     wl2_get_target_build_path(_wl2_target_path)
     set(WL2_TARGET_BUILD_PATH "${_wl2_target_path}" CACHE STRING "Target-specific dependency path segment" FORCE)
 
-    if(WL2_USE_FETCHED_DEPS)
-        set(_default_deps_root "${CMAKE_SOURCE_DIR}/deps/${WL2_TARGET_BUILD_PATH}")
-    else()
-        set(_default_deps_root "${CMAKE_SOURCE_DIR}/.deps/${WL2_TARGET_BUILD_PATH}")
+    set(_default_deps_root "${CMAKE_SOURCE_DIR}/.deps/${WL2_TARGET_BUILD_PATH}")
+    set(_old_default_deps_root "${CMAKE_SOURCE_DIR}/deps/${WL2_TARGET_BUILD_PATH}")
+    if(WL2_DEPS_ROOT STREQUAL "${_old_default_deps_root}")
+        message(WARNING
+            "Migrating deprecated dependency root ${_old_default_deps_root} to ${_default_deps_root}")
+        unset(WL2_DEPS_ROOT CACHE)
     endif()
     set(WL2_DEPS_ROOT "${_default_deps_root}" CACHE PATH "Target-specific local dependency prefix")
 

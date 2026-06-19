@@ -4,6 +4,7 @@
 #include "wl2/runtime.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -1168,6 +1169,14 @@ JSValue runtime_env(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) 
     return result;
 }
 
+JSValue runtime_now(JSContext* ctx, JSValueConst, int, JSValueConst*) {
+    (void)ctx;
+    using Clock = std::chrono::steady_clock;
+    const auto now = Clock::now().time_since_epoch();
+    const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(now).count();
+    return JS_NewFloat64(ctx, static_cast<double>(micros) / 1000.0);
+}
+
 void add_runtime_api(JSContext* ctx) {
     JSValue global = JS_GetGlobalObject(ctx);
     JSValue wl2 = JS_GetPropertyStr(ctx, global, "wl2");
@@ -1193,6 +1202,7 @@ void add_runtime_api(JSContext* ctx) {
 
     JS_SetPropertyStr(ctx, runtimeObj, "modules", JS_NewCFunction(ctx, runtime_modules, "modules", 0));
     JS_SetPropertyStr(ctx, runtimeObj, "env", JS_NewCFunction(ctx, runtime_env, "env", 1));
+    JS_SetPropertyStr(ctx, runtimeObj, "now", JS_NewCFunction(ctx, runtime_now, "now", 0));
 
     JS_SetPropertyStr(ctx, wl2, "runtime", runtimeObj);
     JS_FreeValue(ctx, wl2);

@@ -13,10 +13,17 @@ endif()
 # Rust toolchain: local/package/fetch all consume Slint's published C++ binary
 # package (an installed CMake package), while "source" (opt-in) builds from
 # source via FetchContent and is the only provider that needs cargo/Rust.
-set(WL2_SLINT_PROVIDER "fetch" CACHE STRING "slint provider: auto, local, package, fetch, source, or off")
+set(WL2_SLINT_PROVIDER "auto" CACHE STRING "slint provider: auto, local, package, fetch, source, or off")
 set_property(CACHE WL2_SLINT_PROVIDER PROPERTY STRINGS auto local package fetch source off)
-if(WL2_USE_FETCHED_DEPS)
-    set(WL2_SLINT_PROVIDER "fetch" CACHE STRING "slint provider: auto, local, package, fetch, source, or off" FORCE)
+option(WL2_SLINT_FROM_SOURCE "Build Slint from source when WL2_DEPS_SLINT=download" OFF)
+if(COMMAND wl2_dependency_configure_provider)
+    if(WL2_SLINT_PROVIDER STREQUAL "source")
+        message(WARNING "WL2_SLINT_PROVIDER=source is deprecated; use -DWL2_DEPS_SLINT=download -DWL2_SLINT_FROM_SOURCE=ON")
+        set(WL2_DEPS_SLINT "download" CACHE STRING "SLINT dependency mode: inherit, auto, local, system, download, or off" FORCE)
+        set(WL2_SLINT_FROM_SOURCE ON CACHE BOOL "Build Slint from source when WL2_DEPS_SLINT=download" FORCE)
+        set(WL2_SLINT_PROVIDER "auto" CACHE STRING "slint provider: auto, local, package, fetch, source, or off" FORCE)
+    endif()
+    wl2_dependency_configure_provider(SLINT WL2_SLINT_PROVIDER)
 endif()
 
 set(WL2_SLINT_VERSION "1.8.0" CACHE STRING "Slint release version for the fetch/source providers")
@@ -46,9 +53,8 @@ option(WL2_SLINT_NATIVE_DIALOGS "Enable native file/folder dialogs in wl2_slint 
 set(WL2_SLINT_NFD_PROVIDER "auto" CACHE STRING
     "nativefiledialog-extended provider for wl2_slint native dialogs: auto, local, package, fetch, or off")
 set_property(CACHE WL2_SLINT_NFD_PROVIDER PROPERTY STRINGS auto local package fetch off)
-if(WL2_USE_FETCHED_DEPS)
-    set(WL2_SLINT_NFD_PROVIDER "fetch" CACHE STRING
-        "nativefiledialog-extended provider for wl2_slint native dialogs: auto, local, package, fetch, or off" FORCE)
+if(COMMAND wl2_dependency_configure_provider)
+    wl2_dependency_configure_provider(SLINT_NFD WL2_SLINT_NFD_PROVIDER)
 endif()
 set(WL2_SLINT_NFD_GIT_REPOSITORY "https://github.com/btzy/nativefiledialog-extended.git"
     CACHE STRING "nativefiledialog-extended repository for the fetch provider")

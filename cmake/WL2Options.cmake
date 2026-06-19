@@ -1,3 +1,5 @@
+include("${CMAKE_CURRENT_LIST_DIR}/deps/WL2Dependency.cmake")
+
 option(WL2_BUILD_TESTING "Build Winglib2 tests" ON)
 option(WL2_BUILD_SHARED_MODULES "Build dynamic WL2 modules" OFF)
 option(WL2_BUILD_STATIC_MODULES "Build static WL2 modules" ON)
@@ -9,8 +11,9 @@ option(WL2_ENABLE_LIBMEMBUS "Build first-class libmembus shared-memory wrappers 
 option(WL2_ENABLE_EXTENDED_MODULES "Build extended modules by default" ON)
 option(WL2_ENABLE_ALL_MODULES "Build every discovered module in the source tree unless listed in WL2_DISABLE_MODULES" OFF)
 option(WL2_ENABLE_V8 "Compatibility option: build with WL2_JS_ENGINE=v8" OFF)
-option(WL2_FETCH_DEPS "Download and build missing dependencies locally" ON)
-option(WL2_USE_FETCHED_DEPS "Fetch and use target-local dependencies instead of package/system dependencies" OFF)
+option(WL2_FETCH_DEPS "Deprecated compatibility option; use WL2_DEPS instead" ON)
+option(WL2_USE_FETCHED_DEPS "Deprecated compatibility option; use WL2_DEPS=download instead" OFF)
+wl2_dependency_configure_global_default()
 
 set(WL2_JS_ENGINE "quickjs" CACHE STRING "JavaScript engine backend: quickjs or v8")
 set_property(CACHE WL2_JS_ENGINE PROPERTY STRINGS quickjs v8)
@@ -32,11 +35,8 @@ set(WL2_LIBMEMBUS_TARGET_VERSION "1.2.0" CACHE STRING "Target libmembus API vers
 set(WL2_LIBMEMBUS_PROVIDER "auto" CACHE STRING "libmembus provider: auto, local, package, fetch, or off")
 set_property(CACHE WL2_LIBMEMBUS_PROVIDER PROPERTY STRINGS auto local package fetch off)
 
-if(WL2_USE_FETCHED_DEPS)
-    set(WL2_FETCH_DEPS ON CACHE BOOL "Download and build missing dependencies locally" FORCE)
-    set(WL2_QUICKJS_PROVIDER "fetch" CACHE STRING "QuickJS provider: auto, local, package, fetch, or off" FORCE)
-    set(WL2_LIBMEMBUS_PROVIDER "fetch" CACHE STRING "libmembus provider: auto, local, package, fetch, or off" FORCE)
-endif()
+wl2_dependency_configure_provider(QUICKJS WL2_QUICKJS_PROVIDER)
+wl2_dependency_configure_provider(LIBMEMBUS WL2_LIBMEMBUS_PROVIDER)
 
 function(wl2_configure_dependency_options)
     if(NOT WL2_DEPS_ROOT)

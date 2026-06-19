@@ -11,6 +11,8 @@ int main(int argc, char** argv) {
 
     wl2::RuntimeOptions options;
     options.allowFilesystem = false;
+    options.allowSharedMemory = true;
+    options.sharedMemoryAllowList = {"/wl2_foundations"};
     options.staticModules.push_back(wl2_membus_register_module);
 
     wl2::Runtime runtime(std::move(options));

@@ -269,6 +269,14 @@ JSValue throw_error(JSContext* ctx, const wl2::Error& error) {
     return JS_Throw(ctx, err);
 }
 
+wl2::Result<void> authorize_shared_memory(JSContext* ctx, std::string_view name) {
+    auto* runtime = static_cast<wl2::Runtime*>(JS_GetContextOpaque(ctx));
+    if (!runtime) {
+        return wl2::Error("shared_memory_denied", "Shared-memory access is not permitted without a runtime policy");
+    }
+    return runtime->authorizeSharedMemory(name);
+}
+
 JSValue make_buffer(JSContext* ctx, std::string_view bytes) {
     JSValue arrayBuffer = JS_NewArrayBufferCopy(
         ctx,
@@ -318,6 +326,9 @@ JSValue sb_create(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* 
     int64_t size = 0;
     JS_ToInt64(ctx, &size, argv[1]);
     bool replace = argc > 2 ? js_bool_prop(ctx, argv[2], "replaceExisting", true) : true;
+    if (auto allowed = authorize_shared_memory(ctx, name); !allowed) {
+        return throw_error(ctx, allowed.error());
+    }
     auto result = wl2::SharedBuffer::create(name, static_cast<size_t>(std::max<int64_t>(0, size)), replace);
     if (!result) {
         return throw_error(ctx, result.error());
@@ -334,6 +345,9 @@ JSValue sb_attach(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* 
     int64_t size = 0;
     if (argc > 1) {
         JS_ToInt64(ctx, &size, argv[1]);
+    }
+    if (auto allowed = authorize_shared_memory(ctx, name); !allowed) {
+        return throw_error(ctx, allowed.error());
     }
     auto result = wl2::SharedBuffer::attach(name, static_cast<size_t>(std::max<int64_t>(0, size)));
     if (!result) {
@@ -403,6 +417,9 @@ JSValue sq_create(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* 
     int64_t size = 0;
     JS_ToInt64(ctx, &size, argv[1]);
     bool writable = JS_ToBool(ctx, argv[2]) != 0;
+    if (auto allowed = authorize_shared_memory(ctx, name); !allowed) {
+        return throw_error(ctx, allowed.error());
+    }
     auto result = wl2::SharedQueue::create(name, static_cast<size_t>(std::max<int64_t>(0, size)), writable);
     if (!result) {
         return throw_error(ctx, result.error());
@@ -419,6 +436,9 @@ JSValue sq_attach(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* 
     int64_t size = 0;
     JS_ToInt64(ctx, &size, argv[1]);
     bool writable = JS_ToBool(ctx, argv[2]) != 0;
+    if (auto allowed = authorize_shared_memory(ctx, name); !allowed) {
+        return throw_error(ctx, allowed.error());
+    }
     auto result = wl2::SharedQueue::attach(name, static_cast<size_t>(std::max<int64_t>(0, size)), writable);
     if (!result) {
         return throw_error(ctx, result.error());
@@ -507,6 +527,9 @@ JSValue vb_create(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* 
     JS_ToInt64(ctx, &height, argv[2]);
     JS_ToInt64(ctx, &fps, argv[3]);
     JS_ToInt64(ctx, &buffers, argv[4]);
+    if (auto allowed = authorize_shared_memory(ctx, name); !allowed) {
+        return throw_error(ctx, allowed.error());
+    }
     auto result = wl2::VideoBuffer::create(name, width, height, fps, buffers);
     if (!result) {
         return throw_error(ctx, result.error());
@@ -519,7 +542,11 @@ JSValue vb_open_existing(JSContext* ctx, JSValueConst thisVal, int argc, JSValue
     if (argc < 1) {
         return JS_ThrowTypeError(ctx, "VideoBuffer.openExisting(name) requires name");
     }
-    auto result = wl2::VideoBuffer::openExisting(js_string(ctx, argv[0]));
+    auto name = js_string(ctx, argv[0]);
+    if (auto allowed = authorize_shared_memory(ctx, name); !allowed) {
+        return throw_error(ctx, allowed.error());
+    }
+    auto result = wl2::VideoBuffer::openExisting(name);
     if (!result) {
         return throw_error(ctx, result.error());
     }
@@ -622,6 +649,9 @@ JSValue ab_create(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* 
     JS_ToInt64(ctx, &sampleRate, argv[3]);
     JS_ToInt64(ctx, &fps, argv[4]);
     JS_ToInt64(ctx, &buffers, argv[5]);
+    if (auto allowed = authorize_shared_memory(ctx, name); !allowed) {
+        return throw_error(ctx, allowed.error());
+    }
     auto result = wl2::AudioBuffer::create(name, channels, bits, sampleRate, fps, buffers);
     if (!result) {
         return throw_error(ctx, result.error());
@@ -634,7 +664,11 @@ JSValue ab_open_existing(JSContext* ctx, JSValueConst thisVal, int argc, JSValue
     if (argc < 1) {
         return JS_ThrowTypeError(ctx, "AudioBuffer.openExisting(name) requires name");
     }
-    auto result = wl2::AudioBuffer::openExisting(js_string(ctx, argv[0]));
+    auto name = js_string(ctx, argv[0]);
+    if (auto allowed = authorize_shared_memory(ctx, name); !allowed) {
+        return throw_error(ctx, allowed.error());
+    }
+    auto result = wl2::AudioBuffer::openExisting(name);
     if (!result) {
         return throw_error(ctx, result.error());
     }
@@ -730,6 +764,9 @@ JSValue cc_create(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* 
     int64_t size = 0;
     JS_ToInt64(ctx, &size, argv[1]);
     bool reader = JS_ToBool(ctx, argv[2]) != 0;
+    if (auto allowed = authorize_shared_memory(ctx, name); !allowed) {
+        return throw_error(ctx, allowed.error());
+    }
     auto result = wl2::CommandChannel::create(name, static_cast<size_t>(std::max<int64_t>(0, size)), reader);
     if (!result) {
         return throw_error(ctx, result.error());
@@ -746,6 +783,9 @@ JSValue cc_attach(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* 
     int64_t size = 0;
     JS_ToInt64(ctx, &size, argv[1]);
     bool reader = argc > 2 ? JS_ToBool(ctx, argv[2]) != 0 : false;
+    if (auto allowed = authorize_shared_memory(ctx, name); !allowed) {
+        return throw_error(ctx, allowed.error());
+    }
     auto result = wl2::CommandChannel::attach(name, static_cast<size_t>(std::max<int64_t>(0, size)), reader);
     if (!result) {
         return throw_error(ctx, result.error());
@@ -810,6 +850,9 @@ JSValue kv_create(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* 
     JS_ToInt64(ctx, &count, argv[1]);
     JS_ToInt64(ctx, &maxName, argv[2]);
     JS_ToInt64(ctx, &maxValue, argv[3]);
+    if (auto allowed = authorize_shared_memory(ctx, name); !allowed) {
+        return throw_error(ctx, allowed.error());
+    }
     auto result = wl2::KeyValueStore::create(name, count, maxName, maxValue, true);
     if (!result) {
         return throw_error(ctx, result.error());
@@ -822,7 +865,11 @@ JSValue kv_open(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* ar
     if (argc < 1) {
         return JS_ThrowTypeError(ctx, "KeyValueStore.open(name) requires name");
     }
-    auto result = wl2::KeyValueStore::open(js_string(ctx, argv[0]));
+    auto name = js_string(ctx, argv[0]);
+    if (auto allowed = authorize_shared_memory(ctx, name); !allowed) {
+        return throw_error(ctx, allowed.error());
+    }
+    auto result = wl2::KeyValueStore::open(name);
     if (!result) {
         return throw_error(ctx, result.error());
     }

@@ -3,8 +3,10 @@
 // window is ever opened. Covers: compile -> create -> property round-trip for
 // number/string/bool/struct, compile-error diagnostics, and show() denial.
 #include "wl2/wl2.h"
+#include "wl2/membus.h"
 #include "wl2_slint/wl2_slint.h"
 
+#include <chrono>
 #include <iostream>
 #include <string>
 
@@ -32,8 +34,32 @@ int fail(const std::string& message) {
 }
 
 int run_slint_tests() {
+    const std::string imageRingName = "/wl2_slint_image_test_" +
+        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    wl2::VideoBuffer imageRing;
+    if (wl2::libmembusHasV12Surface()) {
+        auto created = wl2::VideoBuffer::create(imageRingName, 2, 2, wl2::VideoPixelFormat::Rgba32, 30, 2);
+        if (!created) {
+            return fail("image ring create failed: " + created.error().message());
+        }
+        imageRing = std::move(created.value());
+        auto frame = imageRing.frame(0);
+        if (!frame) {
+            return fail("image ring frame failed: " + frame.error().message());
+        }
+        auto* bytes = reinterpret_cast<unsigned char*>(frame.value().data);
+        for (int y = 0; y < 2; ++y) {
+            auto* row = bytes + y * frame.value().scanWidth;
+            row[0] = 255; row[1] = 0; row[2] = 0; row[3] = 255;
+            row[4] = 0; row[5] = 255; row[6] = 0; row[7] = 255;
+        }
+        imageRing.next(1);
+    }
+
     wl2::RuntimeOptions options;
     // allowUi is left false (the default): show()/hide() must be denied.
+    options.allowSharedMemory = true;
+    options.sharedMemoryAllowList.push_back("/wl2_slint_image_test_");
     options.staticModules.push_back(wl2_slint_register_module);
 
     wl2::Runtime runtime{std::move(options)};
@@ -64,6 +90,7 @@ const ui = await compile(`
     in-out property <[int]> items: [];
     in-out property <[{ id: int, label: string }]> rows: [];
     in-out property <brush> accent: #336699;
+    in-out property <image> viewport;
     callback add(int, int) -> int;
     callback bump();
   }
@@ -108,6 +135,16 @@ assert(rows.length === 2 && rows[1].id === 2 && rows[1].label === "b",
 // CSS hex strings can set brush/color properties.
 win.set("accent", "#123456");
 assert(win.get("accent") === "#123456", "brush hex round-trip failed: " + win.get("accent"));
+
+if ()JS") + std::string(wl2::libmembusHasV12Surface() ? "true" : "false") + R"JS() {
+  const imageMeta = win.setImageFromFrameRing("viewport", ")JS" + js_escape(imageRingName) + R"JS(");
+  assert(imageMeta.updated === true, "image copy should report an update");
+  assert(imageMeta.width === 2 && imageMeta.height === 2, "image dimensions mismatch");
+  assert(imageMeta.stride >= 8, "image stride mismatch");
+  assert(imageMeta.format === "rgba8", "image format mismatch");
+  const skipped = win.setImageFromFrameRing("viewport", ")JS" + js_escape(imageRingName) + R"JS(", { lastSequence: imageMeta.sequence });
+  assert(skipped.updated === false, "image copy should skip stale sequence");
+}
 
 // --- callbacks: on() + invoke(), arg/return marshaling, JS-driven property -----
 // At this point count === 41.
@@ -176,7 +213,7 @@ assert(dialogDenied.code === "slint_permission_denied",
 // Native module reads are denied by default unless RuntimeOptions explicitly
 // grants allowFilesystemReads and a read root.
 let fsDenied = null;
-try { await compileFile(")JS") + js_escape(fixturePath) + R"JS("); } catch (e) { fsDenied = e; }
+try { await compileFile(")JS" + js_escape(fixturePath) + R"JS("); } catch (e) { fsDenied = e; }
 assert(fsDenied && fsDenied.code === "slint_permission_denied",
   "host compileFile should be denied by filesystem read policy: " + (fsDenied && fsDenied.code));
 

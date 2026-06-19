@@ -10,8 +10,8 @@ endif()
 
 set(WL2_ASIO_PROVIDER "auto" CACHE STRING "asio provider: auto, local, package, fetch, or off")
 set_property(CACHE WL2_ASIO_PROVIDER PROPERTY STRINGS auto local package fetch off)
-if(WL2_USE_FETCHED_DEPS)
-    set(WL2_ASIO_PROVIDER "fetch" CACHE STRING "asio provider: auto, local, package, fetch, or off" FORCE)
+if(COMMAND wl2_dependency_configure_provider)
+    wl2_dependency_configure_provider(ASIO WL2_ASIO_PROVIDER)
 endif()
 set(WL2_ASIO_VERSION "1.30.2" CACHE STRING "standalone Asio release version for the fetch provider")
 set(WL2_ASIO_URL

@@ -48,9 +48,9 @@ model as the socket operations, with its own `steady_timer` for `timeoutMs`.
 `close()` posts `cancel()` + `close()` onto the worker thread, so a pending
 accept settles with `asio_closed`.
 
-## Not yet implemented (later phases)
+## Not yet implemented
 
 - Best-effort settling of still-pending operations with `asio_cancelled` at
   runtime shutdown (today they are abandoned as the loop ends; explicit `close()`
   and per-operation `timeoutMs` already give deterministic settlement).
-- UDP, TLS, and Unix-domain sockets — Phase 3 / future expansion.
+- UDP, TLS, and Unix-domain sockets — future expansion.

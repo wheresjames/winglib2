@@ -313,4 +313,34 @@ if(WL2_BUILD_TESTING)
             LABELS "outoftree;modules;cmake"
             TIMEOUT 360)
     endif()
+
+    if(TARGET wl2_3d_static AND TARGET wl2_slint_static AND TARGET wl2_membus_static)
+        add_test(NAME scripts.wl2_3d_morph3d_compile
+            COMMAND
+                $<TARGET_FILE:wl2>
+                run
+                --allow graphics,shared-memory:/wl2_morph3d_
+                ${CMAKE_CURRENT_SOURCE_DIR}/examples/js/scripts/morph3d.js
+                --
+                --compile-only)
+        set_tests_properties(scripts.wl2_3d_morph3d_compile PROPERTIES
+            LABELS "3d;js;slint;membus;examples;smoke"
+            TIMEOUT 30)
+
+        option(WL2_SLINT_DISPLAY_TESTS "Register wl2_slint windowed tests that need a real display" OFF)
+        if(WL2_SLINT_DISPLAY_TESTS)
+            add_test(NAME scripts.wl2_3d_morph3d_selftest
+                COMMAND
+                    $<TARGET_FILE:wl2>
+                    run
+                    --allow ui,graphics,shared-memory:/wl2_morph3d_
+                    ${CMAKE_CURRENT_SOURCE_DIR}/examples/js/scripts/morph3d.js
+                    --
+                    --selftest)
+            set_tests_properties(scripts.wl2_3d_morph3d_selftest PROPERTIES
+                LABELS "3d;js;slint;membus;examples;display;smoke"
+                ENVIRONMENT "SLINT_BACKEND=winit-software"
+                TIMEOUT 45)
+        endif()
+    endif()
 endif()

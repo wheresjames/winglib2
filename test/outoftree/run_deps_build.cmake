@@ -1,4 +1,4 @@
-# Out-of-tree source-dependency build/install test driver (Phase 5).
+# Out-of-tree source-dependency build/install test driver.
 #
 # Proves a project can declare a source-dependency module, then lock/fetch/build/
 # install it AND its transitive module dependency locally, then run an app that

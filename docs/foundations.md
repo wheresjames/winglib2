@@ -45,17 +45,17 @@ target dependency trees reproducible.
 The libmembus provider model is:
 
 ```cmake
-WL2_LIBMEMBUS_PROVIDER=auto|local|package|fetch|off
+WL2_DEPS_LIBMEMBUS=inherit|auto|local|system|download|off
 WL2_LIBMEMBUS_ROOT=.deps/.../libmembus
 WL2_LIBMEMBUS_TARGET_VERSION=1.2.0
 ```
 
 `auto` prefers local source from `WL2_LIBMEMBUS_ROOT` when it exposes the target
-v1.2 surface, fetches the target source when the local checkout is missing or
-older and `WL2_FETCH_DEPS=ON`, then uses installed packages only when explicitly
-requested or when native-build fallback is acceptable. `local` requires local
-source. `package` requires an installed `find_package(libmembus)`
-configuration. `fetch` stages the target source under `WL2_DEPS_ROOT`.
+v1.2 surface, downloads the target source when the local checkout is missing or
+older, then uses installed packages only when native-build fallback is
+acceptable. `local` requires local source. `system` requires an installed
+`find_package(libmembus)` configuration. `download` stages the target source
+under `WL2_DEPS_ROOT`.
 
 ## JavaScript Namespace Defaults
 

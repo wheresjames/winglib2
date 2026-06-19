@@ -1,0 +1,3 @@
+provides: wl2:3d
+category: extended
+summary: 3D UI engine and frame bridge foundation

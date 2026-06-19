@@ -1,4 +1,4 @@
-// wl2:asio — minimal asynchronous TCP networking module (Phase 1: client only).
+// wl2:asio — minimal asynchronous TCP networking module.
 //
 // All Asio socket work runs on a single module-owned worker thread driving one
 // io_context. JavaScript-facing functions (connect/read/write/close) marshal the

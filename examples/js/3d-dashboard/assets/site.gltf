@@ -1,0 +1,19 @@
+{
+  "asset": {
+    "version": "2.0",
+    "generator": "wl2_3d_dashboard_example"
+  },
+  "scene": 0,
+  "scenes": [
+    {
+      "name": "Site",
+      "nodes": [0]
+    }
+  ],
+  "nodes": [
+    {
+      "name": "SiteRoot",
+      "translation": [0.0, 0.0, 0.0]
+    }
+  ]
+}

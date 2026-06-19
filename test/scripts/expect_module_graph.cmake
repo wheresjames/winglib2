@@ -1,4 +1,4 @@
-# End-to-end CLI test for Phase 3 dynamic dependency graphs:
+# End-to-end CLI test for dynamic dependency graphs:
 #   - wl2 module install writes wl2.module.v2 dependency metadata.
 #   - wl2 module validate reports declared dependencies.
 #   - wl2 module graph resolves transitive installed dependencies in order.

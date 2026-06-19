@@ -60,11 +60,23 @@ function(_wl2_source_slint)
     endif()
     include(FetchContent)
     set(SLINT_FEATURE_INTERPRETER ON CACHE BOOL "" FORCE)
+    set(SLINT_FEATURE_RENDERER_SOFTWARE ON CACHE BOOL "" FORCE)
+    set(SLINT_FEATURE_RENDERER_FEMTOVG ON CACHE BOOL "" FORCE)
     FetchContent_Declare(Slint
         GIT_REPOSITORY "${WL2_SLINT_GIT_REPOSITORY}"
         GIT_TAG "v${WL2_SLINT_VERSION}"
         SOURCE_SUBDIR api/cpp)
     FetchContent_MakeAvailable(Slint)
+
+    # A pinned Slint release can predate Rust lints that later became
+    # deny-by-default (e.g. dangerous_implicit_autorefs in rustc ~1.84+), which
+    # turns the from-source build into a hard error on modern toolchains. Cap
+    # dependency lints to warnings — the same treatment cargo gives crates.io
+    # dependencies — by baking RUSTFLAGS into Corrosion's cargo invocation so it
+    # is reproducible without relying on the ambient environment.
+    if(COMMAND corrosion_set_env_vars AND TARGET slint_cpp)
+        corrosion_set_env_vars(slint_cpp "RUSTFLAGS=--cap-lints=warn")
+    endif()
 endfunction()
 
 function(wl2_find_slint)
@@ -76,16 +88,22 @@ function(wl2_find_slint)
 
     if(WL2_SLINT_PROVIDER STREQUAL "off")
         message(STATUS "WL2_SLINT_PROVIDER=off; wl2_slint module disabled")
+        wl2_dependency_note_result(slint DISABLED "WL2_DEPS_SLINT=off")
         return()
     endif()
 
+    if(WL2_SLINT_FROM_SOURCE AND NOT WL2_SLINT_PROVIDER STREQUAL "fetch")
+        message(FATAL_ERROR "WL2_SLINT_FROM_SOURCE=ON requires WL2_DEPS_SLINT=download")
+    endif()
+
     # source (opt-in, requires Rust): build Slint from source.
-    if(WL2_SLINT_PROVIDER STREQUAL "source")
+    if(WL2_SLINT_PROVIDER STREQUAL "source" OR (WL2_SLINT_PROVIDER STREQUAL "fetch" AND WL2_SLINT_FROM_SOURCE))
         _wl2_source_slint()
         if(TARGET Slint::Slint)
             set(WL2_HAVE_SLINT TRUE PARENT_SCOPE)
             set(WL2_SLINT_TARGET Slint::Slint PARENT_SCOPE)
             set(WL2_SLINT_PROVIDER_USED source PARENT_SCOPE)
+            wl2_dependency_note_result(slint download-source "${WL2_SLINT_VERSION}")
             message(STATUS "Using Slint ${WL2_SLINT_VERSION} built from source")
             return()
         endif()
@@ -101,6 +119,7 @@ function(wl2_find_slint)
             set(WL2_HAVE_SLINT TRUE PARENT_SCOPE)
             set(WL2_SLINT_TARGET Slint::Slint PARENT_SCOPE)
             set(WL2_SLINT_PROVIDER_USED local PARENT_SCOPE)
+            wl2_dependency_note_result(slint local "${WL2_SLINT_ROOT}")
             message(STATUS "Using local Slint package from ${WL2_SLINT_ROOT}")
             return()
         endif()
@@ -109,22 +128,19 @@ function(wl2_find_slint)
         endif()
     endif()
 
-    # fetch / auto(+WL2_FETCH_DEPS): download a pinned prebuilt C++ package.
-    if(WL2_SLINT_PROVIDER STREQUAL "fetch" OR (WL2_SLINT_PROVIDER STREQUAL "auto" AND WL2_FETCH_DEPS))
-        if(WL2_FETCH_DEPS)
-            if(NOT WL2_SLINT_ROOT)
-                message(FATAL_ERROR "WL2_SLINT_ROOT is unset; cannot stage fetched Slint")
-            endif()
-            _wl2_fetch_slint(_config_dir)
-            find_package(Slint CONFIG REQUIRED PATHS "${_config_dir}" NO_DEFAULT_PATH)
-            set(WL2_HAVE_SLINT TRUE PARENT_SCOPE)
-            set(WL2_SLINT_TARGET Slint::Slint PARENT_SCOPE)
-            set(WL2_SLINT_PROVIDER_USED fetch PARENT_SCOPE)
-            message(STATUS "Using fetched prebuilt Slint ${WL2_SLINT_VERSION} staged at ${WL2_SLINT_ROOT}")
-            return()
-        elseif(WL2_SLINT_PROVIDER STREQUAL "fetch")
-            message(FATAL_ERROR "WL2_SLINT_PROVIDER=fetch but WL2_FETCH_DEPS=OFF")
+    # fetch / auto: download a pinned prebuilt C++ package.
+    if(WL2_SLINT_PROVIDER STREQUAL "fetch" OR WL2_SLINT_PROVIDER STREQUAL "auto")
+        if(NOT WL2_SLINT_ROOT)
+            message(FATAL_ERROR "WL2_SLINT_ROOT is unset; cannot stage fetched Slint")
         endif()
+        _wl2_fetch_slint(_config_dir)
+        find_package(Slint CONFIG REQUIRED PATHS "${_config_dir}" NO_DEFAULT_PATH)
+        set(WL2_HAVE_SLINT TRUE PARENT_SCOPE)
+        set(WL2_SLINT_TARGET Slint::Slint PARENT_SCOPE)
+        set(WL2_SLINT_PROVIDER_USED fetch PARENT_SCOPE)
+        wl2_dependency_note_result(slint download "${WL2_SLINT_VERSION} ${WL2_SLINT_ROOT}")
+        message(STATUS "Using fetched prebuilt Slint ${WL2_SLINT_VERSION} staged at ${WL2_SLINT_ROOT}")
+        return()
     endif()
 
     # package / auto: a system-installed Slint package.
@@ -134,6 +150,7 @@ function(wl2_find_slint)
             set(WL2_HAVE_SLINT TRUE PARENT_SCOPE)
             set(WL2_SLINT_TARGET Slint::Slint PARENT_SCOPE)
             set(WL2_SLINT_PROVIDER_USED package PARENT_SCOPE)
+            wl2_dependency_note_result(slint system "Slint::Slint")
             message(STATUS "Using package/system Slint")
             return()
         endif()
@@ -143,4 +160,5 @@ function(wl2_find_slint)
     endif()
 
     message(STATUS "Slint not found; wl2_slint module disabled")
+    wl2_dependency_note_result(slint DISABLED "not found")
 endfunction()

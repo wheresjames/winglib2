@@ -106,6 +106,7 @@ include(cmake/WL2CoreLibrary.cmake)
 # Built-in modules register themselves through the module registry; the wl2
 # runner (app/wl2) links the enabled static ones from that registry.
 wl2_add_modules(DIRECTORY modules)
+wl2_dependency_print_summary()
 add_subdirectory(app/wl2)
 
 # Examples, tests, docs, and the installed CMake package. Order matters:

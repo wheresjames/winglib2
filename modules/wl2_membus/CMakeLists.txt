@@ -26,6 +26,8 @@ if(TARGET wl2_membus_static)
             COMMAND
                 $<TARGET_FILE:wl2>
                 run
+                --allow-shared-memory
+                --shared-memory-allow /wl2_js_membus_
                 ${PROJECT_SOURCE_DIR}/test/scripts/wl2_membus_smoke.js)
         set_tests_properties(scripts.wl2_membus_smoke PROPERTIES
             LABELS "js;membus")

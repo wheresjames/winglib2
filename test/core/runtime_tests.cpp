@@ -72,6 +72,14 @@ int run_capability_tests() {
         if (listen || listen.error().code() != "network_listen_denied") {
             return fail("network listen should be denied by default");
         }
+        auto graphics = runtime.authorizeGraphics();
+        if (graphics || graphics.error().code() != "graphics_denied") {
+            return fail("graphics should be denied by default");
+        }
+        auto shm = runtime.authorizeSharedMemory("/wl2/test");
+        if (shm || shm.error().code() != "shared_memory_denied") {
+            return fail("shared memory should be denied by default");
+        }
     }
 
     // Enabled but empty allow-list denies all.
@@ -119,6 +127,33 @@ int run_capability_tests() {
         // Connecting is still denied: the switches are independent.
         if (runtime.authorizeNetworkConnect("0.0.0.0", 8080)) {
             return fail("listen policy must not grant connect");
+        }
+    }
+
+    // Graphics is an independent host-resource switch.
+    {
+        wl2::RuntimeOptions options;
+        options.allowGraphics = true;
+        wl2::Runtime runtime{std::move(options)};
+        if (!runtime.authorizeGraphics()) {
+            return fail("allowGraphics should permit graphics");
+        }
+        if (runtime.authorizeUi()) {
+            return fail("allowGraphics must not grant UI access");
+        }
+    }
+
+    // Shared memory requires both the switch and a matching prefix.
+    {
+        wl2::RuntimeOptions options;
+        options.allowSharedMemory = true;
+        options.sharedMemoryAllowList = {"/wl2/run-123/"};
+        wl2::Runtime runtime{std::move(options)};
+        if (!runtime.authorizeSharedMemory("/wl2/run-123/3d/frames")) {
+            return fail("matching shared-memory prefix should be permitted");
+        }
+        if (runtime.authorizeSharedMemory("/wl2/run-124/3d/frames")) {
+            return fail("non-matching shared-memory prefix should be denied");
         }
     }
 

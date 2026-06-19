@@ -60,4 +60,10 @@ try {
 }
 assert(envArgError, "wl2.runtime.env() without a name did not throw");
 
+assert(typeof wl2.runtime.now === "function", "wl2.runtime.now is missing");
+const t0 = wl2.runtime.now();
+const t1 = wl2.runtime.now();
+assert(Number.isFinite(t0) && Number.isFinite(t1), "wl2.runtime.now should return finite milliseconds");
+assert(t1 >= t0, "wl2.runtime.now should be monotonic");
+
 console.log("wl2_runtime smoke test passed");

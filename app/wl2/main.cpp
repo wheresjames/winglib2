@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cctype>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -25,6 +26,12 @@
 #include <thread>
 #include <utility>
 #include <vector>
+
+#if defined(_WIN32)
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 
 void wl2_register_builtin_static_modules(wl2::RuntimeOptions& options);
 void wl2_append_builtin_static_module_names(std::vector<std::string>& names);
@@ -67,6 +74,9 @@ struct RunCommand {
     bool allowListening = false;
     std::vector<std::string> listenAllowList;
     bool allowUi = false;
+    bool allowGraphics = false;
+    bool allowSharedMemory = false;
+    std::vector<std::string> sharedMemoryAllowList;
     wl2::crash::CrashReportConfig crashReport;
 };
 
@@ -93,7 +103,7 @@ struct TestCommand {
 void usage(std::ostream& out = std::cerr) {
     out
         << "usage:\n"
-        << "  wl2 run [--manifest wl2.yml] [--watch] [--stack-traces=auto|on|off] [--map-resource host:wl2:/prefix] [--trace-resources] [--load-module path] [--allow-module-shadow] [--allow-network] [--network-allow host[:port]] [--allow-listen] [--listen-allow host[:port]] [--allow-ui] [--crash-report=off|auto|<path>] [--crash-report-dir dir] [script] [-- script-args...]\n"
+        << "  wl2 run [--manifest wl2.yml] [--watch] [--stack-traces=auto|on|off] [--map-resource host:wl2:/prefix] [--trace-resources] [--load-module path] [--allow-module-shadow] [--allow ui,graphics,shared-memory[:prefix]] [--allow-network] [--network-allow host[:port]] [--allow-listen] [--listen-allow host[:port]] [--allow-ui] [--allow-graphics] [--allow-shared-memory] [--shared-memory-allow prefix] [--crash-report=off|auto|<path>] [--crash-report-dir dir] [script] [-- script-args...]\n"
         << "  wl2 config [--manifest wl2.yml] [--json] [--map-resource host:wl2:/prefix] [--load-module path]\n"
         << "  wl2 resources <list|read|extract> [--manifest wl2.yml] [--map-resource host:wl2:/prefix] [executable] [path] [--out dir] [--raw]\n"
         << "  wl2 module validate <library-path>\n"
@@ -110,6 +120,7 @@ void usage(std::ostream& out = std::cerr) {
         << "  wl2 test [--manifest wl2.yml] [--filter text] [--json]\n"
         << "  wl2 init <name>\n"
         << "  wl2 showapi <module>\n"
+        << "  wl2 graphics\n"
         << "  wl2 version\n";
 }
 
@@ -173,6 +184,93 @@ bool append_resource_map(std::vector<wl2::ResourceDirectoryMount>& maps, const s
     }
     maps.push_back(std::move(*map));
     return true;
+}
+
+std::vector<std::string> split_csv(std::string_view value) {
+    std::vector<std::string> out;
+    size_t start = 0;
+    while (start <= value.size()) {
+        const size_t comma = value.find(',', start);
+        const size_t end = comma == std::string_view::npos ? value.size() : comma;
+        std::string item(value.substr(start, end - start));
+        const auto first = item.find_first_not_of(" \t\r\n");
+        const auto last = item.find_last_not_of(" \t\r\n");
+        if (first != std::string::npos) {
+            out.push_back(item.substr(first, last - first + 1));
+        }
+        if (comma == std::string_view::npos) {
+            break;
+        }
+        start = comma + 1;
+    }
+    return out;
+}
+
+bool apply_allow_token(RunCommand& command, const std::string& token) {
+    auto colon = token.find(':');
+    const std::string name = colon == std::string::npos ? token : token.substr(0, colon);
+    const std::string value = colon == std::string::npos ? std::string() : token.substr(colon + 1);
+    if (name == "ui") {
+        if (!value.empty()) {
+            std::cerr << "--allow ui does not take a value\n";
+            return false;
+        }
+        command.allowUi = true;
+        return true;
+    }
+    if (name == "graphics") {
+        if (!value.empty()) {
+            std::cerr << "--allow graphics does not take a value\n";
+            return false;
+        }
+        command.allowGraphics = true;
+        return true;
+    }
+    if (name == "shared-memory" || name == "shared_memory") {
+        command.allowSharedMemory = true;
+        if (!value.empty()) {
+            command.sharedMemoryAllowList.push_back(value);
+        }
+        return true;
+    }
+    if (name == "network") {
+        command.allowNetwork = true;
+        if (!value.empty()) {
+            command.networkAllowList.push_back(value);
+        }
+        return true;
+    }
+    if (name == "listen" || name == "listening") {
+        command.allowListening = true;
+        if (!value.empty()) {
+            command.listenAllowList.push_back(value);
+        }
+        return true;
+    }
+    std::cerr << "unknown --allow capability: " << token << '\n';
+    return false;
+}
+
+bool apply_allow_value(RunCommand& command, std::string_view value) {
+    auto tokens = split_csv(value);
+    if (tokens.empty()) {
+        std::cerr << "--allow requires a capability list\n";
+        return false;
+    }
+    for (const auto& token : tokens) {
+        if (!apply_allow_token(command, token)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool stdin_is_terminal() {
+#if defined(_WIN32)
+    return _isatty(_fileno(stdin)) != 0;
+#else
+    return isatty(fileno(stdin)) != 0;
+#endif
 }
 
 bool should_print_details(StackTraceMode mode, const wl2::Error& error) {
@@ -576,6 +674,19 @@ std::optional<RunCommand> parse_run_command(int argc, char** argv, int start, bo
             command.allowModuleShadow = true;
             continue;
         }
+        if (arg == "--allow") {
+            if (++i >= argc || !apply_allow_value(command, argv[i])) {
+                return std::nullopt;
+            }
+            continue;
+        }
+        constexpr std::string_view allowPrefix = "--allow=";
+        if (arg.rfind(allowPrefix, 0) == 0) {
+            if (!apply_allow_value(command, arg.substr(allowPrefix.size()))) {
+                return std::nullopt;
+            }
+            continue;
+        }
         if (arg == "--allow-network") {
             command.allowNetwork = true;
             continue;
@@ -616,6 +727,29 @@ std::optional<RunCommand> parse_run_command(int argc, char** argv, int start, bo
         }
         if (arg == "--allow-ui") {
             command.allowUi = true;
+            continue;
+        }
+        if (arg == "--allow-graphics") {
+            command.allowGraphics = true;
+            continue;
+        }
+        if (arg == "--allow-shared-memory") {
+            command.allowSharedMemory = true;
+            continue;
+        }
+        if (arg == "--shared-memory-allow") {
+            if (++i >= argc) {
+                std::cerr << "--shared-memory-allow requires a name prefix\n";
+                return std::nullopt;
+            }
+            command.allowSharedMemory = true;
+            command.sharedMemoryAllowList.emplace_back(argv[i]);
+            continue;
+        }
+        constexpr std::string_view sharedMemoryAllowPrefix = "--shared-memory-allow=";
+        if (arg.rfind(sharedMemoryAllowPrefix, 0) == 0) {
+            command.allowSharedMemory = true;
+            command.sharedMemoryAllowList.emplace_back(arg.substr(sharedMemoryAllowPrefix.size()));
             continue;
         }
         if (arg == "--crash-report") {
@@ -907,6 +1041,10 @@ int run_script(wl2::RuntimeOptions options, const RunCommand& command) {
     options.allowListening = command.allowListening;
     options.listenAllowList = command.listenAllowList;
     options.allowUi = command.allowUi;
+    options.allowGraphics = command.allowGraphics;
+    options.allowSharedMemory = command.allowSharedMemory;
+    options.sharedMemoryAllowList = command.sharedMemoryAllowList;
+    options.interactivePermissions = stdin_is_terminal();
     wl2::Runtime runtime(std::move(options));
     auto result = runtime.runModule(command.script);
     if (!result) {
@@ -1606,7 +1744,12 @@ int config_json_command(const ConfigCommand& command, const wl2::ResourceStore& 
         print_json_string_array(defaults.listenAllowList);
         const bool uiAllowed = command.manifest ? command.manifest->allowUi : defaults.allowUi;
         std::cout << "},\"ui\":{\"allow\":"
-                  << (uiAllowed ? "true" : "false") << "}},\n";
+                  << (uiAllowed ? "true" : "false") << "},\"graphics\":{\"allow\":"
+                  << (defaults.allowGraphics ? "true" : "false")
+                  << "},\"sharedMemory\":{\"allow\":"
+                  << (defaults.allowSharedMemory ? "true" : "false") << ",\"allowList\":";
+        print_json_string_array(defaults.sharedMemoryAllowList);
+        std::cout << "}},\n";
     }
     std::cout << "  \"dependencies\":[";
     for (size_t i = 0; i < depStatuses.size(); ++i) {
@@ -1728,6 +1871,10 @@ int config_command(const ConfigCommand& command) {
         const bool uiAllowed = command.manifest ? command.manifest->allowUi : defaults.allowUi;
         std::cout << "  ui: " << (uiAllowed ? "allowed" : "denied")
                   << (command.manifest ? " (manifest)" : " (default)") << '\n';
+        std::cout << "  graphics: " << (defaults.allowGraphics ? "allowed" : "denied")
+                  << " (default)\n";
+        std::cout << "  shared memory: " << (defaults.allowSharedMemory ? "allowed" : "denied")
+                  << " (default)\n";
     }
     std::cout << "dependencies:\n";
     auto depStatuses = config_dependency_status(command);
@@ -3179,6 +3326,48 @@ int show_api(wl2::RuntimeOptions options, const std::string& moduleName) {
     return 0;
 }
 
+// `wl2 graphics`: report the 3D renderer and, when a GPU is reachable, the device
+// and GL version. Runs a small probe through the runtime (the renderer lives in
+// the wl2:3d module, accessed via JS) rather than coupling the CLI to a module.
+// Grants the graphics capability since the user explicitly asked to probe it.
+int graphics_command(wl2::RuntimeOptions options) {
+    options.allowGraphics = true;
+
+    static const char kProbe[] =
+        "const td = await import(\"wl2:3d\");\n"
+        "const g = td.queryGraphics();\n"
+        "const lines = [];\n"
+        "lines.push(`renderer:   ${g.renderer}`);\n"
+        "lines.push(`gpu:        ${g.available ? \"available\" : \"unavailable\"}`);\n"
+        "if (g.renderer === \"magnum\" && !g.authorized) {\n"
+        "  lines.push(\"note:       graphics capability not granted\");\n"
+        "}\n"
+        "if (g.device) lines.push(`device:     ${g.device}`);\n"
+        "if (g.glVersion) lines.push(`gl-version: ${g.glVersion}`);\n"
+        "console.log(lines.join(\"\\n\"));\n";
+
+    std::error_code ec;
+    std::filesystem::path dir = std::filesystem::temp_directory_path(ec);
+    if (ec) {
+        std::cerr << "wl2 graphics: no temp directory available: " << ec.message() << '\n';
+        return 1;
+    }
+    const auto unique = std::chrono::steady_clock::now().time_since_epoch().count();
+    std::filesystem::path probe = dir / ("wl2-graphics-probe-" + std::to_string(unique) + ".js");
+    if (!write_text_file(probe, kProbe)) {
+        std::cerr << "wl2 graphics: could not write probe script to " << probe << '\n';
+        return 1;
+    }
+    wl2::Runtime runtime(std::move(options));
+    auto result = runtime.runModule(probe.string());
+    std::filesystem::remove(probe, ec);
+    if (!result) {
+        print_error(result.error(), StackTraceMode::Off);
+        return 1;
+    }
+    return result.value();
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -3222,6 +3411,10 @@ int main(int argc, char** argv) {
             return 2;
         }
         return show_api(std::move(options), argv[2]);
+    }
+
+    if (command == "graphics") {
+        return graphics_command(std::move(options));
     }
 
     if (command == "config") {

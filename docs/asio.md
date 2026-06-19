@@ -46,5 +46,5 @@ the equivalent `RuntimeOptions` fields). See the security doc for details.
 
 ## Dependency provider
 
-Standalone Asio is discovered or fetched through `WL2_ASIO_PROVIDER`
-(`auto|local|package|fetch|off`); see [dependencies.md](dependencies.md).
+Standalone Asio is discovered through `WL2_DEPS_ASIO`
+(`auto|local|system|download|off`); see [dependencies.md](dependencies.md).

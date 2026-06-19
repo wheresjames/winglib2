@@ -21,12 +21,12 @@ configured against an older forced local source tree.
 
 ## Build Policy
 
-The `auto` provider now targets libmembus v1.2.0 by default. If the configured
-local source tree is older and dependency fetching is enabled, CMake stages the
-v1.2.0 source under `WL2_DEPS_ROOT` and builds it locally for the target.
+The `auto` dependency mode now targets libmembus v1.2.0 by default. If the
+configured local source tree is older, CMake stages the v1.2.0 source under
+`WL2_DEPS_ROOT` and builds it locally for the target.
 
 ```sh
-cmake -S . -B build-v12 -DWL2_LIBMEMBUS_PROVIDER=fetch
+cmake -S . -B build-v12 -DWL2_DEPS_LIBMEMBUS=download
 cmake --build build-v12
 ctest --test-dir build-v12 --output-on-failure -L membus
 ```

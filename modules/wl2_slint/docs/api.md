@@ -101,6 +101,43 @@ mode that follows the backend style when it is available.
 Open / close the component window. **Requires the UI capability** (`allowUi`),
 which is denied by default; otherwise throws `slint_permission_denied`.
 
+## Off-screen rendering (UI-on-3D producer)
+
+Maps a component onto a 3D surface by software-rendering it into a libmembus
+`FrameRing` (the UI is the writer) and injecting synthetic input. No window and
+no GPU are involved; the consumer (e.g. `wl2:3d`) samples the ring.
+
+### `useOffscreenRendering() -> true`
+
+Select the headless off-screen Slint platform for this process. Slint's platform
+is **process-global and one-shot**, so this must be called **before**
+`compile()`/`create()`, and it is mutually exclusive with the windowed backend
+(`Component.run()`/`show()`). Throws `slint_unsupported` if a windowed UI is
+already active. (See `slint_offscreen.h`; this is the §6.2 event-loop ownership
+boundary.)
+
+### `instance.renderOffscreenTo(name, { size: [w, h] }) -> metadata`
+
+Bind the instance to a `FrameRing` writer named `name` at `w×h` and render the
+first frame. Frames are RGBA8, sRGB, premultiplied, top-left origin (the shared
+pixel contract). **Requires the shared-memory capability** for `name`. `metadata`
+carries `{ updated, width, height, sequence, format, origin, alpha }`.
+
+### `instance.renderOffscreenFrame() -> metadata`
+
+Re-render and republish the bound instance (e.g. after `set()`).
+
+### `instance.injectPointer(x, y, phase[, button]) -> metadata`
+
+Dispatch a synthetic pointer event in UI pixel coordinates and re-render.
+`phase` is `"press"`, `"release"`, `"move"`, or `"click"` (press+release);
+`button` is `"left"` (default), `"right"`, or `"middle"`.
+
+### `instance.injectKey(text[, phase]) -> metadata`
+
+Dispatch a synthetic key event and re-render. `phase` is `"press"`, `"release"`,
+or `"click"` (default).
+
 ## Value marshaling
 
 | JavaScript          | Slint                              | Direction |

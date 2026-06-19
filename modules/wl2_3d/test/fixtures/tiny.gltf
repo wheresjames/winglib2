@@ -1,0 +1,12 @@
+{
+  "asset": {
+    "version": "2.0",
+    "generator": "wl2_3d_content_assets_test"
+  },
+  "scene": 0,
+  "scenes": [
+    {
+      "nodes": []
+    }
+  ]
+}

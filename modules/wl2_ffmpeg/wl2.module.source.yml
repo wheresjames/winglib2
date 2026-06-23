@@ -1,0 +1,4 @@
+schema: 1
+provides: wl2:ffmpeg
+version: 0.1.0
+category: extended

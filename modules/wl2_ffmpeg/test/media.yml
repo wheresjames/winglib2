@@ -1,0 +1,28 @@
+# Optional external media manifest for wl2_ffmpeg.
+#
+# Required CI tests must not use this file or require network access. Entries
+# added here are optional, pinned by sha256, stored outside the source tree by
+# default, and only fetched via the `wl2_ffmpeg_fetch_test_media` target (gated
+# behind WL2_FFMPEG_DOWNLOAD_TEST_MEDIA=ON).
+#
+# Every entry must carry: name, url, sha256, size, license, purpose, profile.
+# Keep test/fetch-media.cmake in sync with the entries listed here.
+#
+# Suggested optional sources (add entries only with verified pinned hashes):
+#   - FFmpeg FATE samples via a user-provided WL2_FFMPEG_TEST_MEDIA_ROOT
+#   - targeted files from samples.ffmpeg.org (never the full archive)
+#   - small Xiph Derf YUV4MPEG clips for raw conversion/encoding tests
+#   - short excerpts from Blender open movies (e.g. Sintel) for manual playback
+#
+# Example entry schema (commented; fill in a real pinned hash before enabling):
+#
+# media:
+#   - name: xiph-akiyo-qcif
+#     url: https://media.xiph.org/video/derf/y4m/akiyo_qcif.y4m
+#     sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+#     size: 7610368
+#     license: "Xiph.org Derf collection (freely redistributable)"
+#     purpose: "raw YUV4MPEG conversion and encoding checks"
+#     profile: codec
+
+media: []

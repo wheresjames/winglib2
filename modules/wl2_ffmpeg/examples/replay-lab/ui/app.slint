@@ -1,0 +1,499 @@
+import {
+    Button,
+    CheckBox,
+    ComboBox,
+    HorizontalBox,
+    LineEdit,
+    Slider,
+    VerticalBox
+} from "std-widgets.slint";
+
+struct KeyValueRow {
+    key: string,
+    value: string,
+}
+
+struct DiagnosticRow {
+    name: string,
+    value: string,
+}
+
+component PageButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> selected;
+    callback clicked();
+
+    height: 34px;
+    border-radius: 4px;
+    background: root.selected ? #1f6feb : #111822;
+    border-width: 1px;
+    border-color: root.selected ? #388bfd : #263241;
+
+    Text {
+        x: 10px;
+        y: 0;
+        width: parent.width - 20px;
+        height: parent.height;
+        text: root.label;
+        color: root.selected ? #ffffff : #c8d2df;
+        font-size: 12px;
+        font-weight: root.selected ? 800 : 500;
+        vertical-alignment: center;
+    }
+
+    TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+component SectionTitle inherits Text {
+    in property <string> label;
+    text: root.label;
+    color: #f2f6fc;
+    font-size: 15px;
+    font-weight: 800;
+}
+
+component HelpText inherits Text {
+    in property <string> value;
+    text: root.value;
+    color: #8d9aae;
+    font-size: 11px;
+    wrap: word-wrap;
+}
+
+component InfoRow inherits Rectangle {
+    in property <string> key;
+    in property <string> value;
+
+    height: 26px;
+    clip: true;
+    background: #121821;
+    border-width: 1px;
+    border-color: #202a38;
+    border-radius: 3px;
+
+    HorizontalBox {
+        padding-left: 7px;
+        padding-right: 7px;
+        spacing: 7px;
+        Text { text: root.key; width: 86px; color: #8d9aae; font-size: 11px; overflow: elide; }
+        Text { text: root.value; color: #d6deeb; font-size: 11px; overflow: elide; horizontal-stretch: 1; }
+    }
+}
+
+component Metric inherits Rectangle {
+    in property <string> name;
+    in property <string> value;
+
+    height: 32px;
+    clip: true;
+    background: #121821;
+    border-width: 1px;
+    border-color: #202a38;
+    border-radius: 3px;
+
+    HorizontalBox {
+        padding-left: 7px;
+        padding-right: 7px;
+        spacing: 8px;
+        Text { text: root.name; width: 94px; color: #8d9aae; font-size: 11px; overflow: elide; }
+        Text { text: root.value; color: #d6deeb; font-size: 11px; font-weight: 700; overflow: elide; horizontal-stretch: 1; }
+    }
+}
+
+component LabeledInput inherits Rectangle {
+    in property <string> label;
+    in-out property <string> value;
+    callback accepted(string);
+
+    height: 30px;
+    border-width: 1px;
+    border-color: input.has-focus ? #2f81f7 : #283448;
+    border-radius: 4px;
+    background: #0f141c;
+
+    HorizontalBox {
+        padding-left: 8px;
+        padding-right: 6px;
+        spacing: 8px;
+        Text {
+            text: root.label;
+            width: 80px;
+            color: #8d9aae;
+            font-size: 11px;
+            vertical-alignment: center;
+        }
+        input := LineEdit {
+            text <=> root.value;
+            horizontal-stretch: 1;
+            accepted => { root.accepted(self.text); }
+        }
+    }
+}
+
+component Panel inherits Rectangle {
+    background: #111822;
+    border-width: 1px;
+    border-color: #242f3e;
+    border-radius: 5px;
+    clip: true;
+}
+
+export component MainWindow inherits Window {
+    title: "WL2 FFmpeg Replay Lab";
+    preferred-width: 1180px;
+    preferred-height: 760px;
+    min-width: 900px;
+    min-height: 560px;
+    background: #0c1118;
+
+    in-out property <[KeyValueRow]> source-rows;
+    in-out property <[KeyValueRow]> pipeline-rows;
+    in-out property <[DiagnosticRow]> diagnostics;
+    in-out property <string> status: "Ready";
+    in-out property <string> preview-label: "No source loaded";
+    in-out property <image> preview-image;
+    in-out property <string> selected-speed: "1x";
+    in-out property <string> selected-mode: "accurate";
+    in-out property <string> selected-video-format: "rgba";
+    in-out property <string> selected-audio-format: "s16";
+    in-out property <string> selected-scale: "320x180";
+    in-out property <string> export-length: "5";
+    in-out property <string> export-codec: "rawvideo";
+    in-out property <string> transcode-preset: "low-latency";
+    in-out property <string> transcode-codec: "auto";
+    in-out property <bool> transcode-audio: true;
+    in-out property <float> position: 0;
+    in-out property <bool> playing: false;
+    in-out property <bool> filters-enabled: false;
+    in-out property <string> active-page: "source";
+    in-out property <string> last-output: "";
+    in-out property <bool> has-output: false;
+
+    callback play();
+    callback pause();
+    callback tick();
+    callback seek-delta(int);
+    callback seek-percent(float);
+    callback set-seek-mode(string);
+    callback set-speed(string);
+    callback set-video-format(string);
+    callback set-audio-format(string);
+    callback set-scale(string);
+    callback set-export-length(string);
+    callback set-export-codec(string);
+    callback set-transcode-preset(string);
+    callback set-transcode-codec(string);
+    callback set-transcode-audio(bool);
+    callback generate-fixture();
+    callback open-file();
+    callback export-test-video();
+    callback convert-video();
+    callback convert-audio();
+    callback scale-video();
+    callback transcode();
+    callback remux();
+    callback packet-queue();
+    callback export-still();
+    callback export-clip();
+    callback diagnose();
+    callback json-report();
+    callback open-last-output();
+
+    Timer {
+        interval: 33ms;
+        running: root.playing;
+        triggered => { root.tick(); }
+    }
+
+    HorizontalBox {
+        padding: 12px;
+        spacing: 10px;
+
+        // ---- Sidebar: navigation + global source actions ----
+        Panel {
+            min-width: 152px;
+            max-width: 168px;
+
+            VerticalBox {
+                padding: 10px;
+                spacing: 8px;
+
+                Text {
+                    text: "Replay Lab";
+                    color: #f2f6fc;
+                    font-size: 18px;
+                    font-weight: 800;
+                }
+
+                HelpText { value: "wl2:ffmpeg system console"; }
+
+                Rectangle { height: 1px; background: #263241; }
+
+                PageButton { label: "Source"; selected: root.active-page == "source"; clicked => { root.active-page = "source"; } }
+                PageButton { label: "Playback"; selected: root.active-page == "playback"; clicked => { root.active-page = "playback"; } }
+                PageButton { label: "Convert"; selected: root.active-page == "convert"; clicked => { root.active-page = "convert"; } }
+                PageButton { label: "Pipeline"; selected: root.active-page == "pipeline"; clicked => { root.active-page = "pipeline"; } }
+                PageButton { label: "Evidence"; selected: root.active-page == "evidence"; clicked => { root.active-page = "evidence"; } }
+                PageButton { label: "Diagnostics"; selected: root.active-page == "diagnostics"; clicked => { root.active-page = "diagnostics"; } }
+                PageButton { label: "Export"; selected: root.active-page == "export"; clicked => { root.active-page = "export"; } }
+
+                Rectangle { height: 1px; background: #263241; }
+
+                Button { text: "Open File…"; clicked => { root.open-file(); } }
+                Button { text: "Generate…"; clicked => { root.generate-fixture(); } }
+
+                Rectangle { vertical-stretch: 1; }
+            }
+        }
+
+        // ---- Center: preview + transport + verify bar + status ----
+        VerticalBox {
+            horizontal-stretch: 1;
+            spacing: 10px;
+
+            Panel {
+                vertical-stretch: 1;
+                min-height: 220px;
+                background: #05080d;
+                clip: true;
+
+                Image {
+                    source: root.preview-image;
+                    image-fit: contain;
+                    width: 100%;
+                    height: 100%;
+                }
+
+                Rectangle {
+                    x: 0;
+                    y: parent.height - 32px;
+                    width: parent.width;
+                    height: 32px;
+                    background: #05080dcc;
+                    Text {
+                        x: 10px;
+                        width: parent.width - 20px;
+                        height: parent.height;
+                        text: root.preview-label;
+                        color: #f2f6fc;
+                        font-size: 12px;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            Panel {
+                min-height: 96px;
+                max-height: 96px;
+
+                VerticalBox {
+                    padding: 10px;
+                    spacing: 8px;
+
+                    HorizontalBox {
+                        spacing: 7px;
+                        Button { text: root.playing ? "❚❚ Playing" : "▶ Play"; clicked => { root.play(); } }
+                        Button { text: "❚❚ Pause"; clicked => { root.pause(); } }
+                        Button { text: "⏮ -5s"; clicked => { root.seek-delta(-5000000); } }
+                        Button { text: "◄ -1f"; clicked => { root.seek-delta(-33333); } }
+                        Button { text: "+1f ►"; clicked => { root.seek-delta(33333); } }
+                        Button { text: "+5s ⏭"; clicked => { root.seek-delta(5000000); } }
+                    }
+
+                    Slider {
+                        minimum: 0;
+                        maximum: 1000;
+                        value: root.position;
+                        changed => { root.seek-percent(self.value); }
+                    }
+                }
+            }
+
+            if root.has-output : Panel {
+                min-height: 48px;
+                max-height: 48px;
+
+                HorizontalBox {
+                    padding-left: 10px;
+                    padding-right: 8px;
+                    padding-top: 7px;
+                    padding-bottom: 7px;
+                    spacing: 8px;
+                    Text {
+                        text: "Last output: " + root.last-output;
+                        color: #9fb2cc;
+                        font-size: 11px;
+                        overflow: elide;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                    Button { text: "Open / Verify"; clicked => { root.open-last-output(); } }
+                }
+            }
+
+            Panel {
+                min-height: 92px;
+                max-height: 130px;
+
+                Text {
+                    x: 10px;
+                    y: 8px;
+                    width: parent.width - 20px;
+                    height: parent.height - 16px;
+                    text: root.status;
+                    color: #c8d2df;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+            }
+        }
+
+        // ---- Right: per-page tools ----
+        Panel {
+            min-width: 300px;
+            max-width: 340px;
+
+            VerticalBox {
+                padding: 12px;
+                spacing: 9px;
+
+                if root.active-page == "source" : VerticalBox {
+                    spacing: 7px;
+                    SectionTitle { label: "Source Inspector"; }
+                    HelpText { value: "Open external media or generate a synthetic source from the sidebar. Live details below."; }
+                    Rectangle { height: 1px; background: #263241; }
+                    for row in root.source-rows: InfoRow { key: row.key; value: row.value; }
+                    Rectangle { vertical-stretch: 1; }
+                }
+
+                if root.active-page == "playback" : VerticalBox {
+                    spacing: 7px;
+                    SectionTitle { label: "Playback Tools"; }
+                    HelpText { value: "Transport lives under the preview. Set seek mode, direction, and speed here; counters update live."; }
+                    Text { text: "Seek mode"; color: #8d9aae; font-size: 11px; }
+                    ComboBox {
+                        model: ["accurate", "fast", "nearest", "frame"];
+                        current-value: root.selected-mode;
+                        selected(value) => { root.set-seek-mode(value); }
+                    }
+                    Text { text: "Speed / direction"; color: #8d9aae; font-size: 11px; }
+                    ComboBox {
+                        model: ["-4x", "-2x", "-1x", "0.5x", "1x", "2x", "4x", "8x"];
+                        current-value: root.selected-speed;
+                        selected(value) => { root.set-speed(value); }
+                    }
+                    Rectangle { height: 1px; background: #263241; }
+                    for item in root.diagnostics: Metric { name: item.name; value: item.value; }
+                    Rectangle { vertical-stretch: 1; }
+                }
+
+                if root.active-page == "convert" : VerticalBox {
+                    spacing: 7px;
+                    SectionTitle { label: "Conversion Probes"; }
+                    HelpText { value: "Decode the current position into alternate pixel/sample formats. Result shows the frame and conversion metrics."; }
+                    Text { text: "Video pixel format"; color: #8d9aae; font-size: 11px; }
+                    ComboBox {
+                        model: ["rgba", "bgra", "rgb24", "bgr24", "gray8", "yuv420p", "nv12"];
+                        current-value: root.selected-video-format;
+                        selected(value) => { root.set-video-format(value); }
+                    }
+                    Button { text: "Convert Video Frame"; clicked => { root.convert-video(); } }
+                    Text { text: "Audio sample format"; color: #8d9aae; font-size: 11px; }
+                    ComboBox {
+                        model: ["s16", "flt", "dbl", "s32", "u8"];
+                        current-value: root.selected-audio-format;
+                        selected(value) => { root.set-audio-format(value); }
+                    }
+                    Button { text: "Convert Audio Window"; clicked => { root.convert-audio(); } }
+                    if root.filters-enabled : VerticalBox {
+                        spacing: 7px;
+                        Text { text: "FilterGraph scale"; color: #8d9aae; font-size: 11px; }
+                        ComboBox {
+                            model: ["320x180", "640x360", "1280x720", "160x90"];
+                            current-value: root.selected-scale;
+                            selected(value) => { root.set-scale(value); }
+                        }
+                        Button { text: "Scale with FilterGraph"; clicked => { root.scale-video(); } }
+                    }
+                    if !root.filters-enabled : HelpText { value: "FilterGraph is not compiled into this build, so scaling is unavailable."; }
+                    Rectangle { vertical-stretch: 1; }
+                }
+
+                if root.active-page == "pipeline" : VerticalBox {
+                    spacing: 7px;
+                    SectionTitle { label: "Pipeline Operations"; }
+                    HelpText { value: "Transcode/remux/queue to a destination you choose, then Open / Verify the result under the preview."; }
+                    Text { text: "Transcode preset"; color: #8d9aae; font-size: 11px; }
+                    ComboBox {
+                        model: ["low-latency", "archival"];
+                        current-value: root.transcode-preset;
+                        selected(value) => { root.set-transcode-preset(value); }
+                    }
+                    Text { text: "Transcode video codec"; color: #8d9aae; font-size: 11px; }
+                    ComboBox {
+                        model: ["auto", "mpeg4", "mjpeg", "ffv1"];
+                        current-value: root.transcode-codec;
+                        selected(value) => { root.set-transcode-codec(value); }
+                    }
+                    CheckBox {
+                        text: "Include audio stream";
+                        checked: root.transcode-audio;
+                        toggled => { root.set-transcode-audio(self.checked); }
+                    }
+                    Button { text: "Transcode…"; clicked => { root.transcode(); } }
+                    Button { text: "Remux (packet copy)…"; clicked => { root.remux(); } }
+                    Button { text: "Packet Queue Round Trip…"; clicked => { root.packet-queue(); } }
+                    Rectangle { height: 1px; background: #263241; }
+                    for row in root.pipeline-rows: InfoRow { key: row.key; value: row.value; }
+                    Rectangle { vertical-stretch: 1; }
+                }
+
+                if root.active-page == "evidence" : VerticalBox {
+                    spacing: 7px;
+                    SectionTitle { label: "Evidence Exports"; }
+                    HelpText { value: "Export a still or a clip around the current position to a destination you choose."; }
+                    Button { text: "Export Still…"; clicked => { root.export-still(); } }
+                    Button { text: "Export Clip…"; clicked => { root.export-clip(); } }
+                    Button { text: "Print JSON Report"; clicked => { root.json-report(); } }
+                    Rectangle { height: 1px; background: #263241; }
+                    for row in root.pipeline-rows: InfoRow { key: row.key; value: row.value; }
+                    Rectangle { vertical-stretch: 1; }
+                }
+
+                if root.active-page == "diagnostics" : VerticalBox {
+                    spacing: 7px;
+                    SectionTitle { label: "Diagnostics"; }
+                    HelpText { value: "Inspect timestamps, playback counters, and current conversion state."; }
+                    Button { text: "Analyze Timestamps"; clicked => { root.diagnose(); } }
+                    Button { text: "Print JSON Report"; clicked => { root.json-report(); } }
+                    Rectangle { height: 1px; background: #263241; }
+                    for item in root.diagnostics: Metric { name: item.name; value: item.value; }
+                    Rectangle { vertical-stretch: 1; }
+                }
+
+                if root.active-page == "export" : VerticalBox {
+                    spacing: 7px;
+                    SectionTitle { label: "Clock Fixture Export"; }
+                    HelpText { value: "Write a test video with burned-in clock, frame counter, and synced tone audio to a destination you choose."; }
+                    LabeledInput {
+                        label: "Seconds";
+                        value <=> root.export-length;
+                        accepted(v) => { root.set-export-length(v); }
+                    }
+                    Text { text: "Video codec"; color: #8d9aae; font-size: 11px; }
+                    ComboBox {
+                        model: ["rawvideo", "mjpeg"];
+                        current-value: root.export-codec;
+                        selected(value) => { root.set-export-codec(value); }
+                    }
+                    Button { text: "Export Test Video…"; clicked => { root.export-test-video(); } }
+                    Rectangle { vertical-stretch: 1; }
+                }
+            }
+        }
+    }
+}

@@ -1,12 +1,19 @@
 import { Scene } from "wl2:3d";
 import { hasV12Surface } from "wl2:membus";
+import { Muxer } from "wl2:ffmpeg";
 
 const argv = wl2.runtime.argv || [];
 const COMPILE_ONLY = argv.includes("--compile-only");
 const SELFTEST = argv.includes("--selftest");
+const outputArgIndex = argv.findIndex((arg) => arg === "--output" || arg === "-o");
+const OUTPUT_PATH = outputArgIndex >= 0 ? argv[outputArgIndex + 1] : null;
+const RECORD = !!OUTPUT_PATH;
 
 const VIEW_W = 1024;
 const VIEW_H = 768;
+const FPS = 30;
+const LOOP_SECONDS = 22;
+const LOOP_FRAMES = FPS * LOOP_SECONDS;
 const COLS = 25;
 const ROWS = 25;
 const RING = `/wl2_morph3d_${Date.now()}_${Math.floor(Math.random() * 1000000)}`;
@@ -182,7 +189,7 @@ function updateVertices(milliseconds) {
   return clock;
 }
 
-const scene = await Scene.create({ size: [VIEW_W, VIEW_H] });
+const scene = await Scene.create({ size: [VIEW_W, VIEW_H], buffers: RECORD ? LOOP_FRAMES : 3 });
 scene.camera.calibrate({ fovY: 45, near: 0.1, far: 1000 });
 scene.camera.lookFrom([0, 6, 15], [0, 0, 0]);
 scene.setAmbientLight("#555555");
@@ -205,7 +212,7 @@ let ui = null;
 let win = null;
 const slint = await import("wl2:slint");
 ui = await slint.compile(SLINT_SOURCE);
-if (!COMPILE_ONLY) {
+if (!COMPILE_ONLY && !RECORD) {
   win = ui.create();
 }
 let lastSequence = -1;
@@ -241,6 +248,26 @@ function step(now) {
   }
 }
 
+function recordLoop(path) {
+  assert(hasV12Surface, "recording requires libmembus v1.2 surface support");
+  assert(path && !path.startsWith("--"), "--output requires a file path");
+  for (let i = 0; i < LOOP_FRAMES; i++) {
+    step(i * (1000 / FPS));
+  }
+  const out = Muxer.writeVideoBuffer({
+    videoBufferName: RING,
+    outputPath: path,
+    fps: FPS,
+    frames: LOOP_FRAMES,
+    startSlot: 1,
+    preset: "low-latency",
+  });
+  assert(out.frames === LOOP_FRAMES, "recorded frame count mismatch");
+  assert(out.reopened, "recorded output should reopen");
+  assert(out.reopenedWidth === VIEW_W && out.reopenedHeight === VIEW_H, "recorded dimensions mismatch");
+  return out;
+}
+
 if (win) {
   win.on("tick", () => {
     step(wl2.runtime.now());
@@ -262,6 +289,10 @@ if (COMPILE_ONLY) {
   assert(lastClock >= 0, "clock should update");
   scene.close();
   console.log("wl2 morph3d compile-only ok");
+} else if (RECORD) {
+  const out = recordLoop(OUTPUT_PATH);
+  scene.close();
+  console.log(`wl2 morph3d wrote ${out.frames} frames to ${OUTPUT_PATH}`);
 } else {
   win.set("live", true);
   step(wl2.runtime.now());

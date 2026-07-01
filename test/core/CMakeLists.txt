@@ -65,6 +65,7 @@ add_test(NAME core.membus.shared_buffer COMMAND wl2_core_tests membus shared_buf
 add_test(NAME core.membus.shared_queue COMMAND wl2_core_tests membus shared_queue)
 add_test(NAME core.membus.video_buffer COMMAND wl2_core_tests membus video_buffer)
 add_test(NAME core.membus.audio_buffer COMMAND wl2_core_tests membus audio_buffer)
+add_test(NAME core.membus.packet_buffer COMMAND wl2_core_tests membus packet_buffer)
 add_test(NAME core.membus.command_channel COMMAND wl2_core_tests membus command_channel)
 add_test(NAME core.membus.key_value_store COMMAND wl2_core_tests membus key_value_store)
 add_test(NAME core.membus.selector COMMAND wl2_core_tests membus selector)
@@ -95,6 +96,7 @@ set_tests_properties(
     core.membus.shared_queue
     core.membus.video_buffer
     core.membus.audio_buffer
+    core.membus.packet_buffer
     core.membus.command_channel
     core.membus.key_value_store
     core.membus.selector

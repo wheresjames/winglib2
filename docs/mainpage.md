@@ -15,7 +15,7 @@ Start with:
 Implementation notes:
 
 - @ref foundations covers the shared membus/resources/thread-tree decisions.
-- @ref membus_cpp covers the libmembus v1.2 C++ wrappers.
+- @ref membus_cpp covers the libmembus v2.1 C++ wrappers.
 - @ref membus_javascript covers the JavaScript `wl2:membus` bindings.
 - @ref resources_storage covers mixed stored/compressed resources, directory
   embedding, and tree navigation.

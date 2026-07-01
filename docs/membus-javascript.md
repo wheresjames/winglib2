@@ -11,16 +11,20 @@ import {
   SharedQueue,
   VideoBuffer,
   AudioBuffer,
+  PacketBuffer,
   CommandChannel,
   KeyValueStore,
   Selector,
-  hasV12Surface
+  hasV12Surface,
+  hasV21Surface
 } from "wl2:membus";
 ```
 
 `hasV12Surface` reports whether the selected libmembus dependency exposes the
-full v1.2 surface. With the default provider policy this should be true because
-Winglib2 stages libmembus v1.2.0 when the sibling checkout is older.
+full v1.2 surface. `hasV21Surface` reports whether the selected dependency
+exposes `mempkt` / `PacketBuffer`. With the default provider policy both should
+be true because Winglib2 stages libmembus v2.1.0 when the local checkout is
+older.
 
 ## Handle Lifecycle
 
@@ -44,6 +48,27 @@ values, any typed-array or `DataView` view (such as `Uint8Array`, honoring the
 view's byte offset and length), and objects exposing a binary-safe
 `arrayBuffer()` or `text()` method such as `wl2.Buffer`.
 
+## PacketBuffer
+
+`PacketBuffer` wraps libmembus `mempkt` for variable-length compressed or
+packetized records. Use it when the payload is a compressed access unit, muxed
+packet, metadata event, or other byte record that does not fit fixed-size video
+or audio frame rings.
+
+```js
+const packets = PacketBuffer.create("/wl2_packets", 64, 1024 * 1024, 256 * 1024, {
+  metadata: wl2.buffer.fromText("stream-config")
+});
+const nextPtr = packets.write(packetBytes, {
+  kind: "video",
+  track: 0,
+  pts: 12345,
+  metadata: headerBytes
+});
+const slot = (nextPtr + packets.metadata().buffers - 1) % packets.metadata().buffers;
+const record = packets.record(slot);
+```
+
 ## Selector
 
 The JavaScript selector API uses non-consuming predicates:
@@ -65,6 +90,7 @@ The returned value is the first ready predicate index, or `-1` on timeout.
 - message queue write/read/poll
 - video buffer metadata and frame bytes
 - audio buffer metadata and payload bytes
+- packet buffer metadata and variable-length records
 - command channel write/read
 - key-value store schema, named values, indexed values, and snapshots
 - selector timeout and ready-index behavior

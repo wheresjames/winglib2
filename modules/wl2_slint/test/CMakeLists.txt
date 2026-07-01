@@ -62,6 +62,7 @@ add_test(NAME scripts.wl2_slint_permission_denied
     COMMAND
         $<TARGET_FILE:wl2>
         run
+        --no-permission-prompt
         ${CMAKE_CURRENT_SOURCE_DIR}/js/permission_denied.test.js)
 set_tests_properties(scripts.wl2_slint_permission_denied PROPERTIES
     LABELS "js;slint;integration"

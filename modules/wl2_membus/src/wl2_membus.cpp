@@ -30,6 +30,7 @@ constexpr const char* MembusApi = R"(Exports JavaScript module wl2:membus.
 Classes:
   SharedBuffer
   SharedQueue
+  PacketBuffer
   VideoBuffer
   AudioBuffer
   CommandChannel
@@ -43,6 +44,7 @@ timeout values.)";
 #if WL2_HAVE_QUICKJS
 JSClassID shared_buffer_class_id = 0;
 JSClassID shared_queue_class_id = 0;
+JSClassID packet_buffer_class_id = 0;
 JSClassID video_buffer_class_id = 0;
 JSClassID audio_buffer_class_id = 0;
 JSClassID command_channel_class_id = 0;
@@ -68,6 +70,11 @@ void shared_buffer_finalizer(JSRuntime* rt, JSValue val) {
 void shared_queue_finalizer(JSRuntime* rt, JSValue val) {
     (void)rt;
     delete static_cast<NativeBox<wl2::SharedQueue>*>(JS_GetOpaque(val, shared_queue_class_id));
+}
+
+void packet_buffer_finalizer(JSRuntime* rt, JSValue val) {
+    (void)rt;
+    delete static_cast<NativeBox<wl2::PacketBuffer>*>(JS_GetOpaque(val, packet_buffer_class_id));
 }
 
 void video_buffer_finalizer(JSRuntime* rt, JSValue val) {
@@ -308,6 +315,39 @@ JSValue read_result(JSContext* ctx, const wl2::MembusReadResult& result) {
     return obj;
 }
 
+const char* packet_kind_name(wl2::PacketKind kind) {
+    switch (kind) {
+    case wl2::PacketKind::Video:
+        return "video";
+    case wl2::PacketKind::Audio:
+        return "audio";
+    default:
+        return "data";
+    }
+}
+
+wl2::PacketKind packet_kind_from_name(std::string_view name) {
+    if (name == "video") {
+        return wl2::PacketKind::Video;
+    }
+    if (name == "audio") {
+        return wl2::PacketKind::Audio;
+    }
+    return wl2::PacketKind::Data;
+}
+
+JSValue packet_record(JSContext* ctx, const wl2::PacketRecord& record) {
+    JSValue obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, obj, "payload", make_buffer(ctx, record.payload));
+    JS_SetPropertyStr(ctx, obj, "metadata", make_buffer(ctx, record.metadata));
+    JS_SetPropertyStr(ctx, obj, "sequence", JS_NewInt64(ctx, record.sequence));
+    JS_SetPropertyStr(ctx, obj, "pts", JS_NewInt64(ctx, record.pts));
+    JS_SetPropertyStr(ctx, obj, "kind", JS_NewString(ctx, packet_kind_name(record.kind)));
+    JS_SetPropertyStr(ctx, obj, "track", JS_NewInt64(ctx, record.track));
+    JS_SetPropertyStr(ctx, obj, "arenaCursor", JS_NewInt64(ctx, record.arenaCursor));
+    return obj;
+}
+
 template <typename T>
 JSValue bool_method(JSContext* ctx, JSValueConst thisVal, JSClassID classId, bool (T::*fn)() const) {
     auto* native = get_native<T>(ctx, thisVal, classId);
@@ -511,6 +551,178 @@ JSValue sq_existing(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst
     (void)argc;
     (void)argv;
     return bool_method(ctx, thisVal, shared_queue_class_id, &wl2::SharedQueue::existing);
+}
+
+JSValue pb_create(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv) {
+    (void)thisVal;
+    if (argc < 4) {
+        return JS_ThrowTypeError(ctx, "PacketBuffer.create(name, buffers, arenaSize, maxRecord, options) requires four arguments");
+    }
+    auto name = js_string(ctx, argv[0]);
+    int64_t buffers = 0;
+    int64_t arenaSize = 0;
+    int64_t maxRecord = 0;
+    JS_ToInt64(ctx, &buffers, argv[1]);
+    JS_ToInt64(ctx, &arenaSize, argv[2]);
+    JS_ToInt64(ctx, &maxRecord, argv[3]);
+    int64_t align = 0;
+    uint32_t fourcc = 0;
+    std::string metadata;
+    if (argc > 4 && JS_IsObject(argv[4])) {
+        JSValue alignValue = JS_GetPropertyStr(ctx, argv[4], "align");
+        if (!JS_IsUndefined(alignValue) && !JS_IsNull(alignValue)) {
+            JS_ToInt64(ctx, &align, alignValue);
+        }
+        JS_FreeValue(ctx, alignValue);
+        JSValue fourccValue = JS_GetPropertyStr(ctx, argv[4], "fourcc");
+        if (!JS_IsUndefined(fourccValue) && !JS_IsNull(fourccValue)) {
+            uint32_t parsed = 0;
+            JS_ToUint32(ctx, &parsed, fourccValue);
+            fourcc = parsed;
+        }
+        JS_FreeValue(ctx, fourccValue);
+        JSValue metadataValue = JS_GetPropertyStr(ctx, argv[4], "metadata");
+        if (!JS_IsUndefined(metadataValue) && !JS_IsNull(metadataValue)) {
+            metadata = payload_string(ctx, metadataValue);
+        }
+        JS_FreeValue(ctx, metadataValue);
+    }
+    if (auto allowed = authorize_shared_memory(ctx, name); !allowed) {
+        return throw_error(ctx, allowed.error());
+    }
+    auto result = wl2::PacketBuffer::create(name, buffers, arenaSize, maxRecord, align, fourcc, metadata);
+    if (!result) {
+        return throw_error(ctx, result.error());
+    }
+    return new_native(ctx, packet_buffer_class_id, std::move(result.value()));
+}
+
+JSValue pb_open_existing(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv) {
+    (void)thisVal;
+    if (argc < 1) {
+        return JS_ThrowTypeError(ctx, "PacketBuffer.openExisting(name) requires name");
+    }
+    auto name = js_string(ctx, argv[0]);
+    if (auto allowed = authorize_shared_memory(ctx, name); !allowed) {
+        return throw_error(ctx, allowed.error());
+    }
+    auto result = wl2::PacketBuffer::openExisting(name);
+    if (!result) {
+        return throw_error(ctx, result.error());
+    }
+    return new_native(ctx, packet_buffer_class_id, std::move(result.value()));
+}
+
+JSValue pb_write(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv) {
+    auto* native = get_native<wl2::PacketBuffer>(ctx, thisVal, packet_buffer_class_id);
+    if (!native) {
+        return JS_EXCEPTION;
+    }
+    std::string payload = argc > 0 ? payload_string(ctx, argv[0]) : std::string{};
+    std::string kindName = "data";
+    int64_t track = 0;
+    int64_t pts = 0;
+    std::string metadata;
+    if (argc > 1 && JS_IsObject(argv[1])) {
+        JSValue kindValue = JS_GetPropertyStr(ctx, argv[1], "kind");
+        if (!JS_IsUndefined(kindValue) && !JS_IsNull(kindValue)) {
+            kindName = js_string(ctx, kindValue);
+        }
+        JS_FreeValue(ctx, kindValue);
+        JSValue trackValue = JS_GetPropertyStr(ctx, argv[1], "track");
+        if (!JS_IsUndefined(trackValue) && !JS_IsNull(trackValue)) {
+            JS_ToInt64(ctx, &track, trackValue);
+        }
+        JS_FreeValue(ctx, trackValue);
+        JSValue ptsValue = JS_GetPropertyStr(ctx, argv[1], "pts");
+        if (!JS_IsUndefined(ptsValue) && !JS_IsNull(ptsValue)) {
+            JS_ToInt64(ctx, &pts, ptsValue);
+        }
+        JS_FreeValue(ctx, ptsValue);
+        JSValue metadataValue = JS_GetPropertyStr(ctx, argv[1], "metadata");
+        if (!JS_IsUndefined(metadataValue) && !JS_IsNull(metadataValue)) {
+            metadata = payload_string(ctx, metadataValue);
+        }
+        JS_FreeValue(ctx, metadataValue);
+    }
+    auto result = native->write(payload, packet_kind_from_name(kindName), track, pts, metadata);
+    if (!result) {
+        return throw_error(ctx, result.error());
+    }
+    return JS_NewInt64(ctx, result.value());
+}
+
+JSValue pb_record(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv) {
+    auto* native = get_native<wl2::PacketBuffer>(ctx, thisVal, packet_buffer_class_id);
+    if (!native) {
+        return JS_EXCEPTION;
+    }
+    int64_t index = -1;
+    if (argc > 0) {
+        JS_ToInt64(ctx, &index, argv[0]);
+    }
+    auto result = index >= 0 ? native->record(index) : native->latest();
+    if (!result) {
+        return throw_error(ctx, result.error());
+    }
+    return packet_record(ctx, result.value());
+}
+
+JSValue pb_metadata(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv) {
+    (void)argc;
+    (void)argv;
+    auto* native = get_native<wl2::PacketBuffer>(ctx, thisVal, packet_buffer_class_id);
+    if (!native) {
+        return JS_EXCEPTION;
+    }
+    JSValue obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, obj, "buffers", JS_NewInt64(ctx, native->buffers()));
+    JS_SetPropertyStr(ctx, obj, "pointer", JS_NewInt64(ctx, native->pointer()));
+    JS_SetPropertyStr(ctx, obj, "sequence", JS_NewInt64(ctx, native->sequence()));
+    JS_SetPropertyStr(ctx, obj, "arenaSize", JS_NewInt64(ctx, native->arenaSize()));
+    JS_SetPropertyStr(ctx, obj, "maxRecord", JS_NewInt64(ctx, native->maxRecord()));
+    JS_SetPropertyStr(ctx, obj, "arenaCursor", JS_NewInt64(ctx, native->arenaCursor()));
+    JS_SetPropertyStr(ctx, obj, "sessionId", JS_NewInt64(ctx, native->sessionId()));
+    JS_SetPropertyStr(ctx, obj, "version", JS_NewInt64(ctx, native->version()));
+    JS_SetPropertyStr(ctx, obj, "fourcc", JS_NewUint32(ctx, native->fourcc()));
+    JS_SetPropertyStr(ctx, obj, "metadata", make_buffer(ctx, native->metadata()));
+    return obj;
+}
+
+JSValue pb_wait(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv) {
+    auto* native = get_native<wl2::PacketBuffer>(ctx, thisVal, packet_buffer_class_id);
+    if (!native) {
+        return JS_EXCEPTION;
+    }
+    int64_t lastSequence = -1;
+    if (argc > 0) {
+        JS_ToInt64(ctx, &lastSequence, argv[0]);
+    }
+    const long timeout = timeout_ms(ctx, argc > 1 ? argv[1] : JS_UNDEFINED, 0);
+    return JS_NewBool(ctx, native->waitForPacket(std::chrono::milliseconds{timeout}, lastSequence));
+}
+
+JSValue pb_close(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv) {
+    (void)argc;
+    (void)argv;
+    auto* native = get_native<wl2::PacketBuffer>(ctx, thisVal, packet_buffer_class_id);
+    if (!native) {
+        return JS_EXCEPTION;
+    }
+    native->close();
+    return JS_UNDEFINED;
+}
+
+JSValue pb_is_open(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv) {
+    (void)argc;
+    (void)argv;
+    return bool_method(ctx, thisVal, packet_buffer_class_id, &wl2::PacketBuffer::isOpen);
+}
+
+JSValue pb_existing(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv) {
+    (void)argc;
+    (void)argv;
+    return bool_method(ctx, thisVal, packet_buffer_class_id, &wl2::PacketBuffer::existing);
 }
 
 JSValue vb_create(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv) {
@@ -1058,6 +1270,19 @@ int init_membus_module(JSContext* ctx, JSModuleDef* module) {
     set_method(ctx, shared_queue_class_id, "isOpen", sq_is_open, 0);
     set_method(ctx, shared_queue_class_id, "existing", sq_existing, 0);
 
+    JSValue packetBuffer = JS_NewCFunction2(ctx, [](JSContext* c, JSValueConst, int, JSValueConst*) { return JS_ThrowTypeError(c, "use PacketBuffer.create() or PacketBuffer.openExisting()"); }, "PacketBuffer", 0, JS_CFUNC_constructor, 0);
+    JS_SetPropertyStr(ctx, packetBuffer, "create", JS_NewCFunction(ctx, pb_create, "create", 5));
+    JS_SetPropertyStr(ctx, packetBuffer, "openExisting", JS_NewCFunction(ctx, pb_open_existing, "openExisting", 1));
+    add_class(ctx, &packet_buffer_class_id, "PacketBuffer", packet_buffer_finalizer, packetBuffer);
+    set_method(ctx, packet_buffer_class_id, "write", pb_write, 2);
+    set_method(ctx, packet_buffer_class_id, "record", pb_record, 1);
+    set_method(ctx, packet_buffer_class_id, "latest", pb_record, 0);
+    set_method(ctx, packet_buffer_class_id, "metadata", pb_metadata, 0);
+    set_method(ctx, packet_buffer_class_id, "wait", pb_wait, 2);
+    set_method(ctx, packet_buffer_class_id, "close", pb_close, 0);
+    set_method(ctx, packet_buffer_class_id, "isOpen", pb_is_open, 0);
+    set_method(ctx, packet_buffer_class_id, "existing", pb_existing, 0);
+
     JSValue videoBuffer = JS_NewCFunction2(ctx, [](JSContext* c, JSValueConst, int, JSValueConst*) { return JS_ThrowTypeError(c, "use VideoBuffer.create() or VideoBuffer.openExisting()"); }, "VideoBuffer", 0, JS_CFUNC_constructor, 0);
     JS_SetPropertyStr(ctx, videoBuffer, "create", JS_NewCFunction(ctx, vb_create, "create", 5));
     JS_SetPropertyStr(ctx, videoBuffer, "openExisting", JS_NewCFunction(ctx, vb_open_existing, "openExisting", 1));
@@ -1103,12 +1328,14 @@ int init_membus_module(JSContext* ctx, JSModuleDef* module) {
 
     JS_SetModuleExport(ctx, module, "SharedBuffer", sharedBuffer);
     JS_SetModuleExport(ctx, module, "SharedQueue", sharedQueue);
+    JS_SetModuleExport(ctx, module, "PacketBuffer", packetBuffer);
     JS_SetModuleExport(ctx, module, "VideoBuffer", videoBuffer);
     JS_SetModuleExport(ctx, module, "AudioBuffer", audioBuffer);
     JS_SetModuleExport(ctx, module, "CommandChannel", commandChannel);
     JS_SetModuleExport(ctx, module, "KeyValueStore", keyValueStore);
     JS_SetModuleExport(ctx, module, "Selector", selector);
     JS_SetModuleExport(ctx, module, "hasV12Surface", JS_NewBool(ctx, wl2::libmembusHasV12Surface()));
+    JS_SetModuleExport(ctx, module, "hasV21Surface", JS_NewBool(ctx, wl2::libmembusHasV21Surface()));
     return 0;
 }
 #endif
@@ -1142,12 +1369,14 @@ extern "C" void* wl2_membus_quickjs_module_factory(void* context, const char* mo
     }
     JS_AddModuleExport(ctx, module, "SharedBuffer");
     JS_AddModuleExport(ctx, module, "SharedQueue");
+    JS_AddModuleExport(ctx, module, "PacketBuffer");
     JS_AddModuleExport(ctx, module, "VideoBuffer");
     JS_AddModuleExport(ctx, module, "AudioBuffer");
     JS_AddModuleExport(ctx, module, "CommandChannel");
     JS_AddModuleExport(ctx, module, "KeyValueStore");
     JS_AddModuleExport(ctx, module, "Selector");
     JS_AddModuleExport(ctx, module, "hasV12Surface");
+    JS_AddModuleExport(ctx, module, "hasV21Surface");
     return module;
 #else
     (void)context;

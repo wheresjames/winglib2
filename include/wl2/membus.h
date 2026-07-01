@@ -32,6 +32,11 @@ namespace wl2 {
 bool libmembusHasV12Surface() noexcept;
 
 /**
+ * @brief Whether the configured libmembus dependency exposes the v2.1 mempkt API surface.
+ */
+bool libmembusHasV21Surface() noexcept;
+
+/**
  * @brief Result of an overrun-aware queue or command-channel read.
  */
 struct MembusReadResult {
@@ -39,6 +44,72 @@ struct MembusReadResult {
     std::string payload;
     /// True when the reader was lapped and resynchronized before returning.
     bool overrun = false;
+};
+
+/**
+ * @brief Compressed/packetized record kind stored in libmembus mempkt.
+ */
+enum class PacketKind : int64_t {
+    Data = 0,
+    Video = 1,
+    Audio = 2
+};
+
+/**
+ * @brief Metadata and payload returned from PacketBuffer.
+ */
+struct PacketRecord {
+    std::string payload;
+    std::string metadata;
+    int64_t sequence = 0;
+    int64_t pts = 0;
+    PacketKind kind = PacketKind::Data;
+    int64_t track = 0;
+    int64_t arenaCursor = 0;
+};
+
+/**
+ * @brief Variable-length compressed packet ring buffer.
+ *
+ * PacketBuffer wraps libmembus v2.1 `mmb::mempkt`, intended for compressed
+ * video/audio access units, muxed packet streams, and live transcoding paths.
+ */
+class PacketBuffer {
+public:
+    PacketBuffer() = default;
+
+    static Result<PacketBuffer> create(std::string name, int64_t buffers, int64_t arenaSize, int64_t maxRecord,
+        int64_t align = 0, uint32_t fourcc = 0, std::string metadata = {});
+    static Result<PacketBuffer> openExisting(std::string name);
+
+    const std::string& name() const noexcept { return name_; }
+    bool isOpen() const;
+    bool existing() const;
+    void close();
+
+    Result<int64_t> write(std::string_view payload, PacketKind kind = PacketKind::Data,
+        int64_t track = 0, int64_t pts = 0, std::string_view metadata = {});
+    Result<PacketRecord> record(int64_t index);
+    Result<PacketRecord> latest();
+    bool waitForPacket(std::chrono::milliseconds timeout, int64_t lastSequence) const;
+
+    int64_t buffers() const;
+    int64_t pointer(int64_t offset = 0) const;
+    int64_t sequence() const;
+    int64_t frameSequence(int64_t index) const;
+    int64_t arenaSize() const;
+    int64_t maxRecord() const;
+    int64_t arenaCursor() const;
+    int64_t sessionId() const;
+    int64_t version() const;
+    uint32_t fourcc() const;
+    std::string metadata() const;
+
+private:
+    struct Impl;
+
+    std::string name_;
+    std::shared_ptr<Impl> impl_;
 };
 
 /**

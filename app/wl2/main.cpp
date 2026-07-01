@@ -76,6 +76,7 @@ struct RunCommand {
     bool allowUi = false;
     bool allowGraphics = false;
     bool allowSharedMemory = false;
+    bool interactivePermissions = true;
     std::vector<std::string> sharedMemoryAllowList;
     wl2::crash::CrashReportConfig crashReport;
 };
@@ -103,7 +104,7 @@ struct TestCommand {
 void usage(std::ostream& out = std::cerr) {
     out
         << "usage:\n"
-        << "  wl2 run [--manifest wl2.yml] [--watch] [--stack-traces=auto|on|off] [--map-resource host:wl2:/prefix] [--trace-resources] [--load-module path] [--allow-module-shadow] [--allow ui,graphics,shared-memory[:prefix]] [--allow-network] [--network-allow host[:port]] [--allow-listen] [--listen-allow host[:port]] [--allow-ui] [--allow-graphics] [--allow-shared-memory] [--shared-memory-allow prefix] [--crash-report=off|auto|<path>] [--crash-report-dir dir] [script] [-- script-args...]\n"
+        << "  wl2 run [--manifest wl2.yml] [--watch] [--stack-traces=auto|on|off] [--map-resource host:wl2:/prefix] [--trace-resources] [--load-module path] [--allow-module-shadow] [--allow ui,graphics,shared-memory[:prefix]] [--allow-network] [--network-allow host[:port]] [--allow-listen] [--listen-allow host[:port]] [--allow-ui] [--allow-graphics] [--allow-shared-memory] [--shared-memory-allow prefix] [--no-permission-prompt] [--crash-report=off|auto|<path>] [--crash-report-dir dir] [script] [-- script-args...]\n"
         << "  wl2 config [--manifest wl2.yml] [--json] [--map-resource host:wl2:/prefix] [--load-module path]\n"
         << "  wl2 resources <list|read|extract> [--manifest wl2.yml] [--map-resource host:wl2:/prefix] [executable] [path] [--out dir] [--raw]\n"
         << "  wl2 module validate <library-path>\n"
@@ -737,6 +738,10 @@ std::optional<RunCommand> parse_run_command(int argc, char** argv, int start, bo
             command.allowSharedMemory = true;
             continue;
         }
+        if (arg == "--no-permission-prompt" || arg == "--non-interactive") {
+            command.interactivePermissions = false;
+            continue;
+        }
         if (arg == "--shared-memory-allow") {
             if (++i >= argc) {
                 std::cerr << "--shared-memory-allow requires a name prefix\n";
@@ -1044,7 +1049,7 @@ int run_script(wl2::RuntimeOptions options, const RunCommand& command) {
     options.allowGraphics = command.allowGraphics;
     options.allowSharedMemory = command.allowSharedMemory;
     options.sharedMemoryAllowList = command.sharedMemoryAllowList;
-    options.interactivePermissions = stdin_is_terminal();
+    options.interactivePermissions = command.interactivePermissions && stdin_is_terminal();
     wl2::Runtime runtime(std::move(options));
     auto result = runtime.runModule(command.script);
     if (!result) {

@@ -108,7 +108,7 @@ targets unless there is a dedicated V8 cross-build workflow for the target.
 
 ## libmembus
 
-Winglib2 targets libmembus `v1.2.0` for the membus wrapper/API update.
+Winglib2 targets libmembus `v2.1.0` for the membus wrapper/API update.
 libmembus is important for compatibility with the existing Winglib ecosystem,
 so it follows the embedded-friendly dependency policy: local source builds are
 the default path when practical, while `find_package(libmembus)` remains
@@ -117,16 +117,16 @@ available for installed/package workflows.
 Useful options:
 
 ```sh
--DWL2_DEPS_LIBMEMBUS=auto     # local v1.2 source, download target source, then system
+-DWL2_DEPS_LIBMEMBUS=auto     # local v2.1 source, download target source, then system
 -DWL2_DEPS_LIBMEMBUS=local    # require WL2_LIBMEMBUS_ROOT source tree
--DWL2_DEPS_LIBMEMBUS=download # download libmembus v1.2.0 into WL2_DEPS_ROOT
+-DWL2_DEPS_LIBMEMBUS=download # download libmembus v2.1.0 into WL2_DEPS_ROOT
 -DWL2_DEPS_LIBMEMBUS=system   # require find_package(libmembus)
 -DWL2_DEPS_LIBMEMBUS=off      # disable libmembus wrappers
 -DWL2_LIBMEMBUS_ROOT=.deps/.../libmembus
 ```
 
-When `auto` sees a local source tree that is older than the target v1.2 surface
-it stages libmembus v1.2.0 under `WL2_DEPS_ROOT` and uses that target source
+When `auto` sees a local source tree that is older than the target v2.1 surface
+it stages libmembus v2.1.0 under `WL2_DEPS_ROOT` and uses that target source
 instead. Cross builds should use `local`, `download`, or
 an explicit package root that was built for the target.
 

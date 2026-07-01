@@ -31,7 +31,7 @@ set(WL2_V8_PROVIDER "auto" CACHE STRING "V8 provider: auto, local, package, or o
 set_property(CACHE WL2_V8_PROVIDER PROPERTY STRINGS auto local package off)
 set(WL2_V8_EXTRA_LIBRARIES "" CACHE STRING "Additional libraries required by the selected V8 build")
 
-set(WL2_LIBMEMBUS_TARGET_VERSION "1.2.0" CACHE STRING "Target libmembus API version for Winglib2 integration")
+set(WL2_LIBMEMBUS_TARGET_VERSION "2.1.0" CACHE STRING "Target libmembus API version for Winglib2 integration")
 set(WL2_LIBMEMBUS_PROVIDER "auto" CACHE STRING "libmembus provider: auto, local, package, fetch, or off")
 set_property(CACHE WL2_LIBMEMBUS_PROVIDER PROPERTY STRINGS auto local package fetch off)
 

@@ -152,6 +152,7 @@ add_test(NAME scripts.wl2_3d_hardening
     COMMAND
         $<TARGET_FILE:wl2>
         run
+        --no-permission-prompt
         # The resize path calls publishTo()/resize(), which render a frame and
         # (with a real renderer) create a headless graphics context. The
         # denied-capability check uses a disallowed shared-memory prefix, which

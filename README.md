@@ -54,8 +54,9 @@ The project is still early, but there is a complete, working vertical slice:
   architecture for later).
 - The `wl2` command-line runner.
 - Embedded resources, including a compressed representation.
-- Native modules: `wl2:curl` (HTTP) and the read-only `wl2:fs` (filesystem),
-  plus `wl2:membus` shared-memory primitives — all importable from JavaScript.
+- Native modules: `wl2:curl` (HTTP), `wl2:fs` (read-only filesystem),
+  `wl2:membus` shared-memory primitives, and extended media/UI modules such as
+  `wl2:ffmpeg`, `wl2:3d`, and `wl2:slint` when enabled.
 - JavaScript globals `wl2.runtime`, `wl2.resources`, and `wl2.thread`.
 - A `wl2_add_module()` CMake helper for building your own native modules.
 - A full CTest suite covering curl, membus, fs, resources, the runtime, the
@@ -259,6 +260,7 @@ The most useful configure options:
 -DWL2_DEPS=download            # strict pinned local dependency build
 -DWL2_DEPS_QUICKJS=download    # force one dependency
 -DWL2_DEPS_CURL=system         # local, system, download, off, or auto
+-DWL2_LIBMEMBUS_TARGET_VERSION=2.1.0 # default; enables mempkt PacketBuffer
 -DWL2_ENABLE_ALL_MODULES=ON    # build every discovered in-tree module
 -DWL2_BUILD_SHARED_MODULES=OFF # default; dynamic module loading is experimental
 -DWL2_ENABLE_STRESS_TESTS=OFF  # default; opt in to stress CTest entries
@@ -340,6 +342,11 @@ mapped resources, and scripts; changes to native/module libraries are reported a
 ```sh
 ./winglib2/build/app/wl2/wl2 run --manifest wl2.yml --watch
 ```
+
+**Permission prompts.** When `wl2 run` is attached to an interactive terminal,
+denied UI, graphics, or shared-memory requests can prompt the user. Tests and
+automation should pass `--no-permission-prompt` so denied capability checks fail
+immediately and deterministically.
 
 **Shebang scripts** work when `wl2` is on your `PATH`:
 
@@ -733,7 +740,7 @@ cmake --build winglib2/build
 ctest --test-dir winglib2/build --output-on-failure
 ```
 
-The default fast suite (67 checks today) covers C++ unit tests, JavaScript smoke
+The default fast suite (106 checks today) covers C++ unit tests, JavaScript smoke
 scripts, integration checks, and runnable examples. Run a focused slice by label:
 
 ```sh
@@ -768,9 +775,13 @@ winglib2/
     js/                  # JavaScript engine bindings (QuickJS, V8)
   app/wl2/               # the wl2 command-line runner (main.cpp)
   modules/
+    wl2_3d/              # 3D scene/surface module
+    wl2_asio/            # TCP client/server module
     wl2_curl/            # HTTP module
+    wl2_ffmpeg/          # media demux/decode/encode/mux module
     wl2_fs/              # read-only filesystem module
     wl2_membus/          # shared-memory primitives
+    wl2_slint/           # Slint UI/offscreen rendering module
   examples/              # runnable cpp/ and js/ samples, plus modules/wl2_echo
   test/                  # core C++ tests, JavaScript smoke scripts, fixtures
   tools/                 # helper scripts (e.g. install-v8.sh)

@@ -21,13 +21,14 @@ Script-thread launch, tree-addressed messaging, and request/reply coordination.
 
 ## libmembus Target
 
-Winglib2 targets the upstream libmembus `v1.2.0` API surface. That surface
+Winglib2 targets the upstream libmembus `v2.1.0` API surface. That surface
 includes:
 
 - `memmap`
 - `memmsg`
 - `memvid`
 - `memaud`
+- `mempkt`
 - `memcmd`
 - `memkv`
 - `select`
@@ -47,11 +48,11 @@ The libmembus provider model is:
 ```cmake
 WL2_DEPS_LIBMEMBUS=inherit|auto|local|system|download|off
 WL2_LIBMEMBUS_ROOT=.deps/.../libmembus
-WL2_LIBMEMBUS_TARGET_VERSION=1.2.0
+WL2_LIBMEMBUS_TARGET_VERSION=2.1.0
 ```
 
 `auto` prefers local source from `WL2_LIBMEMBUS_ROOT` when it exposes the target
-v1.2 surface, downloads the target source when the local checkout is missing or
+v2.1 surface, downloads the target source when the local checkout is missing or
 older, then uses installed packages only when native-build fallback is
 acceptable. `local` requires local source. `system` requires an installed
 `find_package(libmembus)` configuration. `download` stages the target source

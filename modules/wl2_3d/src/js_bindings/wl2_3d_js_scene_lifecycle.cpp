@@ -4,6 +4,18 @@ JSValue scene_create(JSContext* ctx, JSValueConst thisVal, int argc, JSValueCons
     if (argc > 0 && !read_size(ctx, argv[0], scene->width, scene->height)) {
         return rejected_promise(ctx, make_error("3d_invalid_argument", "Scene.create({ size }) requires positive width and height"));
     }
+    if (argc > 0 && JS_IsObject(argv[0])) {
+        JSValue buffers = JS_GetPropertyStr(ctx, argv[0], "buffers");
+        if (!JS_IsUndefined(buffers) && !JS_IsNull(buffers)) {
+            int64_t parsedBuffers = scene->buffers;
+            if (JS_ToInt64(ctx, &parsedBuffers, buffers) != 0 || parsedBuffers <= 0 || parsedBuffers > 3600) {
+                JS_FreeValue(ctx, buffers);
+                return rejected_promise(ctx, make_error("3d_invalid_argument", "Scene.create({ buffers }) requires 1..3600 buffers"));
+            }
+            scene->buffers = parsedBuffers;
+        }
+        JS_FreeValue(ctx, buffers);
+    }
     scene->ctx = ctx;
     scene->engine.camera.aspect = static_cast<double>(scene->width) / static_cast<double>(scene->height);
     JSValue obj = scene_object(ctx, scene);
@@ -157,4 +169,3 @@ JSValue scene_close(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst
     scene->timelines.clear();
     return JS_UNDEFINED;
 }
-

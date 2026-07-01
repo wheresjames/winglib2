@@ -18,10 +18,16 @@ Run the display-free smoke path:
 wl2 run --allow graphics,shared-memory:/wl2_morph3d_ examples/js/scripts/morph3d.js -- --compile-only
 ```
 
+Save one full geometry loop:
+
+```sh
+wl2 run --allow graphics,shared-memory:/wl2_morph3d_ examples/js/scripts/morph3d.js -- --output /tmp/morph3d.avi
+```
+
 Run the windowed selftest under a display-capable environment:
 
 ```sh
 wl2 run --allow ui,graphics,shared-memory:/wl2_morph3d_ examples/js/scripts/morph3d.js -- --selftest
 ```
 
-FFmpeg/video encoding and stereo/color-key rendering are intentionally deferred.
+Stereo/color-key rendering is intentionally deferred.

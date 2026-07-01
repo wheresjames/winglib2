@@ -193,6 +193,53 @@ int test_audio_buffer() {
 #endif
 }
 
+int test_packet_buffer() {
+#if WL2_HAVE_LIBMEMBUS
+    if (!wl2::libmembusHasV21Surface()) {
+        std::cout << "libmembus v2.1 surface unavailable; skipping packet buffer tests\n";
+        return 0;
+    }
+
+    const auto name = unique_name("packet");
+    auto created = wl2::PacketBuffer::create(name, 8, 4096, 512, 0, 0, "stream-config");
+    if (!created) {
+        return fail(created.error().message());
+    }
+    auto& packets = created.value();
+    if (!packets.isOpen() || packets.buffers() != 8 || packets.arenaSize() < 4096 || packets.maxRecord() != 512 || !packets.sessionId()) {
+        return fail("PacketBuffer metadata mismatch");
+    }
+    if (packets.metadata() != "stream-config") {
+        return fail("PacketBuffer main metadata mismatch");
+    }
+
+    auto written = packets.write("payload", wl2::PacketKind::Video, 2, 12345, "record-meta");
+    if (!written) {
+        return fail(written.error().message());
+    }
+    const int64_t slot = (written.value() + packets.buffers() - 1) % packets.buffers();
+    auto record = packets.record(slot);
+    if (!record || record.value().payload != "payload" || record.value().metadata != "record-meta"
+        || record.value().kind != wl2::PacketKind::Video || record.value().track != 2 || record.value().pts != 12345) {
+        return fail("PacketBuffer record mismatch");
+    }
+    if (!packets.waitForPacket(std::chrono::milliseconds{100}, 0) || packets.sequence() <= 0 || packets.frameSequence(slot) <= 0) {
+        return fail("PacketBuffer sequence mismatch");
+    }
+
+    auto attached = wl2::PacketBuffer::openExisting(name);
+    if (!attached || attached.value().metadata() != "stream-config") {
+        return fail("PacketBuffer openExisting failed");
+    }
+    packets.close();
+    attached.value().close();
+    return 0;
+#else
+    std::cout << "libmembus unavailable; skipping packet buffer tests\n";
+    return 0;
+#endif
+}
+
 int test_command_channel() {
 #if WL2_HAVE_LIBMEMBUS
     if (!wl2::libmembusHasV12Surface()) {
@@ -340,6 +387,9 @@ int run_membus_tests() {
     if (int rc = test_audio_buffer()) {
         return rc;
     }
+    if (int rc = test_packet_buffer()) {
+        return rc;
+    }
     if (int rc = test_command_channel()) {
         return rc;
     }
@@ -365,6 +415,9 @@ int run_membus_test_case(std::string_view name) {
     }
     if (name == "audio_buffer") {
         return test_audio_buffer();
+    }
+    if (name == "packet_buffer") {
+        return test_packet_buffer();
     }
     if (name == "command_channel") {
         return test_command_channel();

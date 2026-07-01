@@ -12,6 +12,9 @@
 #ifndef WL2_LIBMEMBUS_HAS_1_2_SURFACE
 #define WL2_LIBMEMBUS_HAS_1_2_SURFACE 0
 #endif
+#ifndef WL2_LIBMEMBUS_HAS_2_1_SURFACE
+#define WL2_LIBMEMBUS_HAS_2_1_SURFACE 0
+#endif
 
 namespace wl2 {
 
@@ -74,10 +77,35 @@ AudioSampleFormat format_from_bits(int64_t bitsPerSample) {
 }
 #endif
 
+#if WL2_HAVE_LIBMEMBUS && WL2_LIBMEMBUS_HAS_2_1_SURFACE
+mmb::pkt_kind to_native(PacketKind kind) {
+    return static_cast<mmb::pkt_kind>(static_cast<int64_t>(kind));
+}
+
+PacketKind packet_kind_from_native(int64_t kind) {
+    switch (kind) {
+    case 1:
+        return PacketKind::Video;
+    case 2:
+        return PacketKind::Audio;
+    default:
+        return PacketKind::Data;
+    }
+}
+#endif
+
 } // namespace
 
 bool libmembusHasV12Surface() noexcept {
 #if WL2_HAVE_LIBMEMBUS && WL2_LIBMEMBUS_HAS_1_2_SURFACE
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool libmembusHasV21Surface() noexcept {
+#if WL2_HAVE_LIBMEMBUS && WL2_LIBMEMBUS_HAS_2_1_SURFACE
     return true;
 #else
     return false;
@@ -101,6 +129,14 @@ struct AudioBuffer::Impl {
     mmb::memaud audio;
 };
 
+#if WL2_LIBMEMBUS_HAS_2_1_SURFACE
+struct PacketBuffer::Impl {
+    mmb::mempkt packets;
+};
+#else
+struct PacketBuffer::Impl {};
+#endif
+
 #if WL2_LIBMEMBUS_HAS_1_2_SURFACE
 struct CommandChannel::Impl {
     mmb::memcmd channel;
@@ -118,6 +154,7 @@ struct SharedBuffer::Impl {};
 struct SharedQueue::Impl {};
 struct VideoBuffer::Impl {};
 struct AudioBuffer::Impl {};
+struct PacketBuffer::Impl {};
 struct CommandChannel::Impl {};
 struct KeyValueStore::Impl {};
 #endif
@@ -927,6 +964,243 @@ bool AudioBuffer::waitForFrame(std::chrono::milliseconds timeout, int64_t lastSe
     (void)timeout;
     (void)lastSequence;
     return false;
+#endif
+}
+
+Result<PacketBuffer> PacketBuffer::create(std::string name, int64_t buffers, int64_t arenaSize, int64_t maxRecord,
+    int64_t align, uint32_t fourcc, std::string metadata) {
+#if WL2_HAVE_LIBMEMBUS && WL2_LIBMEMBUS_HAS_2_1_SURFACE
+    PacketBuffer packets;
+    packets.name_ = name;
+    packets.impl_ = std::make_shared<Impl>();
+    const void* meta = metadata.empty() ? nullptr : metadata.data();
+    if (!packets.impl_->packets.open(name, true, buffers, arenaSize, maxRecord, align, fourcc, nullptr,
+            meta, static_cast<int64_t>(metadata.size()))) {
+        packets.impl_.reset();
+        return open_error("packet buffer", name);
+    }
+    return packets;
+#else
+    (void)name;
+    (void)buffers;
+    (void)arenaSize;
+    (void)maxRecord;
+    (void)align;
+    (void)fourcc;
+    (void)metadata;
+#if WL2_HAVE_LIBMEMBUS
+    return surface_error("PacketBuffer");
+#else
+    return unavailable_error();
+#endif
+#endif
+}
+
+Result<PacketBuffer> PacketBuffer::openExisting(std::string name) {
+#if WL2_HAVE_LIBMEMBUS && WL2_LIBMEMBUS_HAS_2_1_SURFACE
+    PacketBuffer packets;
+    packets.name_ = name;
+    packets.impl_ = std::make_shared<Impl>();
+    if (!packets.impl_->packets.open_existing(name)) {
+        packets.impl_.reset();
+        return open_error("packet buffer", name);
+    }
+    return packets;
+#else
+    (void)name;
+#if WL2_HAVE_LIBMEMBUS
+    return surface_error("PacketBuffer");
+#else
+    return unavailable_error();
+#endif
+#endif
+}
+
+bool PacketBuffer::isOpen() const {
+#if WL2_HAVE_LIBMEMBUS && WL2_LIBMEMBUS_HAS_2_1_SURFACE
+    return impl_ && impl_->packets.isOpen();
+#else
+    return false;
+#endif
+}
+
+bool PacketBuffer::existing() const {
+#if WL2_HAVE_LIBMEMBUS && WL2_LIBMEMBUS_HAS_2_1_SURFACE
+    return impl_ && impl_->packets.existing();
+#else
+    return false;
+#endif
+}
+
+void PacketBuffer::close() {
+#if WL2_HAVE_LIBMEMBUS && WL2_LIBMEMBUS_HAS_2_1_SURFACE
+    if (impl_) {
+        impl_->packets.close();
+    }
+#endif
+    impl_.reset();
+}
+
+Result<int64_t> PacketBuffer::write(std::string_view payload, PacketKind kind, int64_t track, int64_t pts, std::string_view metadata) {
+#if WL2_HAVE_LIBMEMBUS && WL2_LIBMEMBUS_HAS_2_1_SURFACE
+    if (!isOpen()) {
+        return Error("libmembus_not_open", "PacketBuffer is not open");
+    }
+    const void* meta = metadata.empty() ? nullptr : metadata.data();
+    const int64_t ptr = impl_->packets.write(payload.data(), static_cast<int64_t>(payload.size()), to_native(kind),
+        track, pts, meta, static_cast<int64_t>(metadata.size()));
+    if (ptr < 0) {
+        return Error("libmembus_write_failed", "PacketBuffer write failed");
+    }
+    return ptr;
+#else
+    (void)payload;
+    (void)kind;
+    (void)track;
+    (void)pts;
+    (void)metadata;
+#if WL2_HAVE_LIBMEMBUS
+    return surface_error("PacketBuffer");
+#else
+    return unavailable_error();
+#endif
+#endif
+}
+
+Result<PacketRecord> PacketBuffer::record(int64_t index) {
+#if WL2_HAVE_LIBMEMBUS && WL2_LIBMEMBUS_HAS_2_1_SURFACE
+    if (!isOpen()) {
+        return Error("libmembus_not_open", "PacketBuffer is not open");
+    }
+    std::string payload;
+    std::string meta;
+    mmb::mempkt::recinfo info;
+    if (!impl_->packets.getRecord(index, payload, meta, info)) {
+        return Error("libmembus_read_failed", "PacketBuffer record read failed");
+    }
+    PacketRecord record;
+    record.payload = std::move(payload);
+    record.metadata = std::move(meta);
+    record.sequence = info.seq;
+    record.pts = info.pts;
+    record.kind = packet_kind_from_native(info.kind);
+    record.track = info.track;
+    record.arenaCursor = info.wcursor;
+    return record;
+#else
+    (void)index;
+#if WL2_HAVE_LIBMEMBUS
+    return surface_error("PacketBuffer");
+#else
+    return unavailable_error();
+#endif
+#endif
+}
+
+Result<PacketRecord> PacketBuffer::latest() {
+    return record(pointer(-1));
+}
+
+bool PacketBuffer::waitForPacket(std::chrono::milliseconds timeout, int64_t lastSequence) const {
+#if WL2_HAVE_LIBMEMBUS && WL2_LIBMEMBUS_HAS_2_1_SURFACE
+    return isOpen() && impl_->packets.waitForFrame(timeout_ms(timeout), lastSequence);
+#else
+    (void)timeout;
+    (void)lastSequence;
+    return false;
+#endif
+}
+
+int64_t PacketBuffer::buffers() const {
+#if WL2_HAVE_LIBMEMBUS && WL2_LIBMEMBUS_HAS_2_1_SURFACE
+    return isOpen() ? impl_->packets.getBufs() : 0;
+#else
+    return 0;
+#endif
+}
+
+int64_t PacketBuffer::pointer(int64_t offset) const {
+#if WL2_HAVE_LIBMEMBUS && WL2_LIBMEMBUS_HAS_2_1_SURFACE
+    return isOpen() ? impl_->packets.getPtr(offset) : -1;
+#else
+    (void)offset;
+    return -1;
+#endif
+}
+
+int64_t PacketBuffer::sequence() const {
+#if WL2_HAVE_LIBMEMBUS && WL2_LIBMEMBUS_HAS_2_1_SURFACE
+    return isOpen() ? impl_->packets.getSeq() : -1;
+#else
+    return -1;
+#endif
+}
+
+int64_t PacketBuffer::frameSequence(int64_t index) const {
+#if WL2_HAVE_LIBMEMBUS && WL2_LIBMEMBUS_HAS_2_1_SURFACE
+    return isOpen() ? impl_->packets.getFrameSeq(index) : -1;
+#else
+    (void)index;
+    return -1;
+#endif
+}
+
+int64_t PacketBuffer::arenaSize() const {
+#if WL2_HAVE_LIBMEMBUS && WL2_LIBMEMBUS_HAS_2_1_SURFACE
+    return isOpen() ? impl_->packets.getArenaSize() : 0;
+#else
+    return 0;
+#endif
+}
+
+int64_t PacketBuffer::maxRecord() const {
+#if WL2_HAVE_LIBMEMBUS && WL2_LIBMEMBUS_HAS_2_1_SURFACE
+    return isOpen() ? impl_->packets.getMaxRec() : 0;
+#else
+    return 0;
+#endif
+}
+
+int64_t PacketBuffer::arenaCursor() const {
+#if WL2_HAVE_LIBMEMBUS && WL2_LIBMEMBUS_HAS_2_1_SURFACE
+    return isOpen() ? impl_->packets.getWcursor() : 0;
+#else
+    return 0;
+#endif
+}
+
+int64_t PacketBuffer::sessionId() const {
+#if WL2_HAVE_LIBMEMBUS && WL2_LIBMEMBUS_HAS_2_1_SURFACE
+    return isOpen() ? impl_->packets.getSessionId() : 0;
+#else
+    return 0;
+#endif
+}
+
+int64_t PacketBuffer::version() const {
+#if WL2_HAVE_LIBMEMBUS && WL2_LIBMEMBUS_HAS_2_1_SURFACE
+    return isOpen() ? impl_->packets.getVersion() : -1;
+#else
+    return -1;
+#endif
+}
+
+uint32_t PacketBuffer::fourcc() const {
+#if WL2_HAVE_LIBMEMBUS && WL2_LIBMEMBUS_HAS_2_1_SURFACE
+    return isOpen() ? impl_->packets.getFourcc() : 0;
+#else
+    return 0;
+#endif
+}
+
+std::string PacketBuffer::metadata() const {
+#if WL2_HAVE_LIBMEMBUS && WL2_LIBMEMBUS_HAS_2_1_SURFACE
+    if (!isOpen() || impl_->packets.getMetaSize() <= 0 || !impl_->packets.getMeta()) {
+        return {};
+    }
+    return std::string(impl_->packets.getMeta(), static_cast<size_t>(impl_->packets.getMetaSize()));
+#else
+    return {};
 #endif
 }
 

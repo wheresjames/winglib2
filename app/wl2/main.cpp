@@ -78,6 +78,8 @@ struct RunCommand {
     bool allowSharedMemory = false;
     bool interactivePermissions = true;
     std::vector<std::string> sharedMemoryAllowList;
+    bool allowFilesystemReads = false;
+    std::vector<std::filesystem::path> filesystemReadRoots;
     wl2::crash::CrashReportConfig crashReport;
 };
 
@@ -104,7 +106,7 @@ struct TestCommand {
 void usage(std::ostream& out = std::cerr) {
     out
         << "usage:\n"
-        << "  wl2 run [--manifest wl2.yml] [--watch] [--stack-traces=auto|on|off] [--map-resource host:wl2:/prefix] [--trace-resources] [--load-module path] [--allow-module-shadow] [--allow ui,graphics,shared-memory[:prefix]] [--allow-network] [--network-allow host[:port]] [--allow-listen] [--listen-allow host[:port]] [--allow-ui] [--allow-graphics] [--allow-shared-memory] [--shared-memory-allow prefix] [--no-permission-prompt] [--crash-report=off|auto|<path>] [--crash-report-dir dir] [script] [-- script-args...]\n"
+        << "  wl2 run [--manifest wl2.yml] [--watch] [--stack-traces=auto|on|off] [--map-resource host:wl2:/prefix] [--trace-resources] [--load-module path] [--allow-module-shadow] [--allow ui,graphics,shared-memory[:prefix],filesystem-read[:root]] [--allow-network] [--network-allow host[:port]] [--allow-listen] [--listen-allow host[:port]] [--allow-ui] [--allow-graphics] [--allow-shared-memory] [--shared-memory-allow prefix] [--allow-filesystem-reads] [--filesystem-read-root root] [--no-permission-prompt] [--crash-report=off|auto|<path>] [--crash-report-dir dir] [script] [-- script-args...]\n"
         << "  wl2 config [--manifest wl2.yml] [--json] [--map-resource host:wl2:/prefix] [--load-module path]\n"
         << "  wl2 resources <list|read|extract> [--manifest wl2.yml] [--map-resource host:wl2:/prefix] [executable] [path] [--out dir] [--raw]\n"
         << "  wl2 module validate <library-path>\n"
@@ -238,6 +240,13 @@ bool apply_allow_token(RunCommand& command, const std::string& token) {
         command.allowNetwork = true;
         if (!value.empty()) {
             command.networkAllowList.push_back(value);
+        }
+        return true;
+    }
+    if (name == "filesystem-read" || name == "filesystem_read" || name == "fs-read" || name == "fs_read") {
+        command.allowFilesystemReads = true;
+        if (!value.empty()) {
+            command.filesystemReadRoots.emplace_back(value);
         }
         return true;
     }
@@ -751,6 +760,25 @@ std::optional<RunCommand> parse_run_command(int argc, char** argv, int start, bo
             command.sharedMemoryAllowList.emplace_back(argv[i]);
             continue;
         }
+        if (arg == "--allow-filesystem-reads") {
+            command.allowFilesystemReads = true;
+            continue;
+        }
+        if (arg == "--filesystem-read-root") {
+            if (++i >= argc) {
+                std::cerr << "--filesystem-read-root requires a directory\n";
+                return std::nullopt;
+            }
+            command.allowFilesystemReads = true;
+            command.filesystemReadRoots.emplace_back(argv[i]);
+            continue;
+        }
+        constexpr std::string_view filesystemReadRootPrefix = "--filesystem-read-root=";
+        if (arg.rfind(filesystemReadRootPrefix, 0) == 0) {
+            command.allowFilesystemReads = true;
+            command.filesystemReadRoots.emplace_back(arg.substr(filesystemReadRootPrefix.size()));
+            continue;
+        }
         constexpr std::string_view sharedMemoryAllowPrefix = "--shared-memory-allow=";
         if (arg.rfind(sharedMemoryAllowPrefix, 0) == 0) {
             command.allowSharedMemory = true;
@@ -1049,6 +1077,8 @@ int run_script(wl2::RuntimeOptions options, const RunCommand& command) {
     options.allowGraphics = command.allowGraphics;
     options.allowSharedMemory = command.allowSharedMemory;
     options.sharedMemoryAllowList = command.sharedMemoryAllowList;
+    options.allowFilesystemReads = command.allowFilesystemReads;
+    options.filesystemReadRoots = command.filesystemReadRoots;
     options.interactivePermissions = command.interactivePermissions && stdin_is_terminal();
     wl2::Runtime runtime(std::move(options));
     auto result = runtime.runModule(command.script);

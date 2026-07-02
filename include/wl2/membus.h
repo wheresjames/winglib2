@@ -297,6 +297,7 @@ public:
      * @return Open VideoBuffer on success, or an Error.
      */
     static Result<VideoBuffer> attach(std::string name, int64_t width, int64_t height, int64_t fps, int64_t buffers);
+    static Result<VideoBuffer> attach(std::string name, int64_t width, int64_t height, VideoPixelFormat format, int64_t fps, int64_t buffers);
 
     /**
      * @brief Attach to an existing video ring buffer and read metadata from it.
@@ -472,6 +473,7 @@ public:
      * @return Open AudioBuffer on success, or an Error.
      */
     static Result<AudioBuffer> attach(std::string name, int64_t channels, int64_t bitsPerSample, int64_t sampleRate, int64_t fps, int64_t buffers);
+    static Result<AudioBuffer> attach(std::string name, int64_t channels, AudioSampleFormat format, int64_t sampleRate, int64_t fps, int64_t buffers);
 
     /**
      * @brief Attach to an existing audio ring buffer and read metadata from it.

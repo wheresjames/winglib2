@@ -354,6 +354,7 @@ private:
     bool initialized_ = false;
     mutable bool interactivePermissionPrompted_ = false;
     mutable bool interactivePermissionApproved_ = false;
+    mutable std::vector<std::filesystem::path> interactiveFilesystemReadRoots_;
 };
 
 } // namespace wl2

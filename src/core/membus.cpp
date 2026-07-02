@@ -440,12 +440,28 @@ Result<VideoBuffer> VideoBuffer::create(std::string name, int64_t width, int64_t
 
 Result<VideoBuffer> VideoBuffer::attach(std::string name, int64_t width, int64_t height, int64_t fps, int64_t buffers) {
 #if WL2_HAVE_LIBMEMBUS
+    return attach(std::move(name), width, height, VideoPixelFormat::Rgb24, fps, buffers);
+#else
+    (void)name;
+    (void)width;
+    (void)height;
+    (void)fps;
+    (void)buffers;
+    return unavailable_error();
+#endif
+}
+
+Result<VideoBuffer> VideoBuffer::attach(std::string name, int64_t width, int64_t height, VideoPixelFormat format, int64_t fps, int64_t buffers) {
+#if WL2_HAVE_LIBMEMBUS
     VideoBuffer video;
     video.name_ = name;
     video.impl_ = std::make_shared<Impl>();
 #if WL2_LIBMEMBUS_HAS_1_2_SURFACE
-    if (!video.impl_->video.open(name, false, width, height, mmb::video_format::rgb24, fps, buffers)) {
+    if (!video.impl_->video.open(name, false, width, height, to_native(format), fps, buffers)) {
 #else
+    if (format != VideoPixelFormat::Rgb24) {
+        return surface_error("non-RGB24 VideoBuffer formats");
+    }
     if (!video.impl_->video.open(name, false, width, height, 24, fps, buffers)) {
 #endif
         video.impl_.reset();
@@ -456,6 +472,7 @@ Result<VideoBuffer> VideoBuffer::attach(std::string name, int64_t width, int64_t
     (void)name;
     (void)width;
     (void)height;
+    (void)format;
     (void)fps;
     (void)buffers;
     return unavailable_error();
@@ -723,12 +740,30 @@ Result<AudioBuffer> AudioBuffer::create(std::string name, int64_t channels, Audi
 
 Result<AudioBuffer> AudioBuffer::attach(std::string name, int64_t channels, int64_t bitsPerSample, int64_t sampleRate, int64_t fps, int64_t buffers) {
 #if WL2_HAVE_LIBMEMBUS
+    return attach(std::move(name), channels, format_from_bits(bitsPerSample), sampleRate, fps, buffers);
+#else
+    (void)name;
+    (void)channels;
+    (void)bitsPerSample;
+    (void)sampleRate;
+    (void)fps;
+    (void)buffers;
+    return unavailable_error();
+#endif
+}
+
+Result<AudioBuffer> AudioBuffer::attach(std::string name, int64_t channels, AudioSampleFormat format, int64_t sampleRate, int64_t fps, int64_t buffers) {
+#if WL2_HAVE_LIBMEMBUS
     AudioBuffer audio;
     audio.name_ = name;
     audio.impl_ = std::make_shared<Impl>();
 #if WL2_LIBMEMBUS_HAS_1_2_SURFACE
-    if (!audio.impl_->audio.open(name, false, channels, to_native(format_from_bits(bitsPerSample)), sampleRate, fps, buffers)) {
+    if (!audio.impl_->audio.open(name, false, channels, to_native(format), sampleRate, fps, buffers)) {
 #else
+    if (format != AudioSampleFormat::U8 && format != AudioSampleFormat::S16Le) {
+        return surface_error("non-8/16-bit AudioBuffer formats");
+    }
+    const int64_t bitsPerSample = format == AudioSampleFormat::U8 ? 8 : 16;
     if (!audio.impl_->audio.open(name, false, channels, bitsPerSample, sampleRate, fps, buffers)) {
 #endif
         audio.impl_.reset();
@@ -738,7 +773,7 @@ Result<AudioBuffer> AudioBuffer::attach(std::string name, int64_t channels, int6
 #else
     (void)name;
     (void)channels;
-    (void)bitsPerSample;
+    (void)format;
     (void)sampleRate;
     (void)fps;
     (void)buffers;

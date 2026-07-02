@@ -54,12 +54,18 @@ bool prefix_allowed(const std::vector<std::string>& allowList, std::string_view 
     return false;
 }
 
+bool path_contained_by(const std::filesystem::path& target, const std::filesystem::path& root) {
+    namespace fs = std::filesystem;
+    fs::path relative = target.lexically_relative(root);
+    return !relative.empty() && *relative.begin() != "..";
+}
+
 bool prompt_yes_no(const std::vector<std::string>& requested) {
     std::cerr << "Script requests host permissions:\n";
     for (const auto& item : requested) {
         std::cerr << "  - " << item << '\n';
     }
-    std::cerr << "Allow these and subsequent UI, graphics, and shared-memory requests for this run? [y/N] ";
+    std::cerr << "Allow these and subsequent matching host permission requests for this run? [y/N] ";
     std::string answer;
     if (!std::getline(std::cin, answer)) {
         return false;
@@ -213,10 +219,6 @@ bool Runtime::environmentAccessAllowed(std::string_view name) const noexcept {
 
 std::optional<std::filesystem::path> Runtime::resolveFilesystemReadPath(
     const std::filesystem::path& requested) const {
-    if (!options_.allowFilesystemReads || options_.filesystemReadRoots.empty()) {
-        return std::nullopt;
-    }
-
     namespace fs = std::filesystem;
     std::error_code ec;
 
@@ -235,19 +237,43 @@ std::optional<std::filesystem::path> Runtime::resolveFilesystemReadPath(
         canonicalTarget = target.lexically_normal();
     }
 
-    for (const auto& root : options_.filesystemReadRoots) {
+    auto root_contains_target = [&](const fs::path& root) {
         std::error_code rootEc;
         fs::path canonicalRoot = fs::weakly_canonical(root, rootEc);
         if (rootEc) {
             canonicalRoot = root.lexically_normal();
         }
-        // Contained when the relative path neither escapes (`..`) nor is empty
-        // (unrelated). A target equal to the root yields ".", which is allowed.
-        fs::path relative = canonicalTarget.lexically_relative(canonicalRoot);
-        if (!relative.empty() && *relative.begin() != "..") {
+        return path_contained_by(canonicalTarget, canonicalRoot);
+    };
+
+    if (options_.allowFilesystemReads) {
+        for (const auto& root : options_.filesystemReadRoots) {
+            if (root_contains_target(root)) {
+                return canonicalTarget;
+            }
+        }
+    }
+
+    for (const auto& root : interactiveFilesystemReadRoots_) {
+        if (root_contains_target(root)) {
             return canonicalTarget;
         }
     }
+
+    if (options_.interactivePermissions) {
+        fs::path requestedRoot = canonicalTarget;
+        std::error_code statusEc;
+        if (!fs::is_directory(canonicalTarget, statusEc)) {
+            requestedRoot = canonicalTarget.parent_path();
+        }
+        if (!requestedRoot.empty()
+            && prompt_yes_no({"filesystem read " + canonicalTarget.string()
+                + " (grant read access under " + requestedRoot.string() + ")"})) {
+            interactiveFilesystemReadRoots_.push_back(requestedRoot);
+            return canonicalTarget;
+        }
+    }
+
     return std::nullopt;
 }
 

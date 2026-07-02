@@ -237,10 +237,11 @@ public:
     /**
      * @brief Authorize an outbound network connection against policy.
      *
-     * Network access is denied by default. It is permitted only when
+     * Network access is denied by default. It is permitted when
      * RuntimeOptions::allowNetwork is set and @p host / @p port match an entry in
-     * RuntimeOptions::networkAllowList. This is the single policy gate modules
-     * such as `wl2:asio` consult before connecting.
+     * RuntimeOptions::networkAllowList. Interactive CLI runs may also prompt and
+     * cache the approved endpoint for the current run. This is the single policy
+     * gate modules such as `wl2:asio` consult before connecting.
      *
      * @param host Destination host name or address.
      * @param port Destination port.
@@ -252,9 +253,10 @@ public:
     /**
      * @brief Authorize listening for inbound connections against policy.
      *
-     * Listening is denied by default. It is permitted only when
+     * Listening is denied by default. It is permitted when
      * RuntimeOptions::allowListening is set and @p host / @p port match an entry
-     * in RuntimeOptions::listenAllowList.
+     * in RuntimeOptions::listenAllowList. Interactive CLI runs may also prompt
+     * and cache the approved endpoint for the current run.
      *
      * @param host Local bind host name or address.
      * @param port Local bind port.
@@ -354,6 +356,8 @@ private:
     bool initialized_ = false;
     mutable bool interactivePermissionPrompted_ = false;
     mutable bool interactivePermissionApproved_ = false;
+    mutable std::vector<std::string> interactiveNetworkAllowList_;
+    mutable std::vector<std::string> interactiveListenAllowList_;
     mutable std::vector<std::filesystem::path> interactiveFilesystemReadRoots_;
 };
 

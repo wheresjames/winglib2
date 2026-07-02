@@ -128,12 +128,23 @@ int main() {
 }
 ]=])
 
+# This test validates out-of-tree extended-module packaging (wl2_add_module ->
+# install -> consumer link), not the real extended modules. Keep extended
+# modules enabled so the wl2:extdep fixture builds, but disable the heavy
+# in-tree extended modules whose third-party stacks (libdatachannel, Magnum,
+# GStreamer, FFmpeg, Slint) would otherwise be fetched and built from scratch on
+# every run, dominating the runtime while adding nothing to what is under test.
 set(_config_args
     "${CMAKE_COMMAND_PATH}" -S "${MAIN_SOURCE_DIR}" -B "${_build_dir}" -G "${GENERATOR}"
     "-DWL2_EXTRA_MODULE_DIRS=${_modules_root}"
     "-DWL2_BUILD_EXAMPLES=OFF"
     "-DWL2_BUILD_TESTING=OFF"
-    "-DWL2_BUILD_DOCS=OFF")
+    "-DWL2_BUILD_DOCS=OFF"
+    "-DWL2_ENABLE_WEBRTC=OFF"
+    "-DWL2_ENABLE_FFMPEG=OFF"
+    "-DWL2_ENABLE_GSTREAMER=OFF"
+    "-DWL2_ENABLE_SLINT=OFF"
+    "-DWL2_ENABLE_3D=OFF")
 if(BUILD_TYPE)
     list(APPEND _config_args "-DCMAKE_BUILD_TYPE=${BUILD_TYPE}")
 endif()

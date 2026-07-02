@@ -2,6 +2,7 @@
 
 #include <cstdlib>
 #include <iostream>
+#include <sstream>
 #include <string>
 
 namespace {
@@ -128,6 +129,35 @@ int run_capability_tests() {
         if (runtime.authorizeNetworkConnect("0.0.0.0", 8080)) {
             return fail("listen policy must not grant connect");
         }
+    }
+
+    // Interactive network/listen prompts cache only the approved endpoint.
+    {
+        wl2::RuntimeOptions options;
+        options.interactivePermissions = true;
+        wl2::Runtime runtime{std::move(options)};
+
+        std::istringstream input("y\ny\nn\n");
+        auto* oldCin = std::cin.rdbuf(input.rdbuf());
+
+        if (!runtime.authorizeNetworkListen("127.0.0.1", 0)) {
+            std::cin.rdbuf(oldCin);
+            return fail("interactive listen approval should permit requested endpoint");
+        }
+        if (!runtime.authorizeNetworkConnect("127.0.0.1", 4567)) {
+            std::cin.rdbuf(oldCin);
+            return fail("interactive connect approval should permit requested endpoint");
+        }
+        if (!runtime.authorizeNetworkConnect("127.0.0.1", 4567)) {
+            std::cin.rdbuf(oldCin);
+            return fail("approved connect endpoint should be cached");
+        }
+        if (runtime.authorizeNetworkConnect("127.0.0.1", 4568)) {
+            std::cin.rdbuf(oldCin);
+            return fail("interactive connect approval should not grant all endpoints");
+        }
+
+        std::cin.rdbuf(oldCin);
     }
 
     // Graphics is an independent host-resource switch.

@@ -56,7 +56,7 @@ The project is still early, but there is a complete, working vertical slice:
 - Embedded resources, including a compressed representation.
 - Native modules: `wl2:curl` (HTTP), `wl2:fs` (read-only filesystem),
   `wl2:membus` shared-memory primitives, and extended media/UI modules such as
-  `wl2:ffmpeg`, `wl2:3d`, and `wl2:slint` when enabled.
+  `wl2:ffmpeg`, `wl2:3d`, `wl2:slint`, and `wl2:webrtc` when enabled.
 - JavaScript globals `wl2.runtime`, `wl2.resources`, and `wl2.thread`.
 - A `wl2_add_module()` CMake helper for building your own native modules.
 - A full CTest suite covering curl, membus, fs, resources, the runtime, the
@@ -782,6 +782,7 @@ winglib2/
     wl2_fs/              # read-only filesystem module
     wl2_membus/          # shared-memory primitives
     wl2_slint/           # Slint UI/offscreen rendering module
+    wl2_webrtc/          # libdatachannel WebRTC, data channels, RTP, signaling
   examples/              # runnable cpp/ and js/ samples, plus modules/wl2_echo
   test/                  # core C++ tests, JavaScript smoke scripts, fixtures
   tools/                 # helper scripts (e.g. install-v8.sh)

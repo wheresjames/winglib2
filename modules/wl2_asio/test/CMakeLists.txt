@@ -17,10 +17,14 @@ set_tests_properties(scripts.wl2_asio_tcp_echo PROPERTIES
     TIMEOUT 30)
 
 # Default-denied policy: no grant is passed, so connect() must be denied.
+# --no-permission-prompt forces the non-interactive path so the denial is
+# deterministic; without it, running under an interactive terminal makes the
+# runtime prompt on stdin and the test hangs waiting for input.
 add_test(NAME scripts.wl2_asio_permission_denied
     COMMAND
         $<TARGET_FILE:wl2>
         run
+        --no-permission-prompt
         ${CMAKE_CURRENT_SOURCE_DIR}/js/permission_denied.test.js)
 set_tests_properties(scripts.wl2_asio_permission_denied PROPERTIES
     LABELS "js;asio;integration"

@@ -45,6 +45,10 @@ bool endpoint_allowed(const std::vector<std::string>& allowList, std::string_vie
     return false;
 }
 
+std::string endpoint_text(std::string_view host, uint16_t port) {
+    return std::string(host) + ":" + std::to_string(port);
+}
+
 bool prefix_allowed(const std::vector<std::string>& allowList, std::string_view value) {
     for (const auto& entry : allowList) {
         if (!entry.empty() && value.rfind(entry, 0) == 0) {
@@ -102,21 +106,31 @@ Runtime::~Runtime() {
 }
 
 Result<void> Runtime::authorizeNetworkConnect(std::string_view host, uint16_t port) const {
-    if (!options_.allowNetwork || !endpoint_allowed(options_.networkAllowList, host, port)) {
-        return Error("network_connect_denied",
-            "Network connection to " + std::string(host) + ":" + std::to_string(port)
-                + " is not permitted by policy");
+    if ((options_.allowNetwork && endpoint_allowed(options_.networkAllowList, host, port)) ||
+        endpoint_allowed(interactiveNetworkAllowList_, host, port)) {
+        return {};
     }
-    return {};
+    const std::string endpoint = endpoint_text(host, port);
+    if (options_.interactivePermissions && prompt_yes_no({"network connection to " + endpoint})) {
+        interactiveNetworkAllowList_.push_back(endpoint);
+        return {};
+    }
+    return Error("network_connect_denied",
+        "Network connection to " + endpoint + " is not permitted by policy");
 }
 
 Result<void> Runtime::authorizeNetworkListen(std::string_view host, uint16_t port) const {
-    if (!options_.allowListening || !endpoint_allowed(options_.listenAllowList, host, port)) {
-        return Error("network_listen_denied",
-            "Listening on " + std::string(host) + ":" + std::to_string(port)
-                + " is not permitted by policy");
+    if ((options_.allowListening && endpoint_allowed(options_.listenAllowList, host, port)) ||
+        endpoint_allowed(interactiveListenAllowList_, host, port)) {
+        return {};
     }
-    return {};
+    const std::string endpoint = endpoint_text(host, port);
+    if (options_.interactivePermissions && prompt_yes_no({"network listener on " + endpoint})) {
+        interactiveListenAllowList_.push_back(endpoint);
+        return {};
+    }
+    return Error("network_listen_denied",
+        "Listening on " + endpoint + " is not permitted by policy");
 }
 
 bool Runtime::interactivePermissionAllowed(const std::vector<std::string>& requested) const {

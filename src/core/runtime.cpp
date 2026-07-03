@@ -1,5 +1,6 @@
 #include "wl2/runtime.h"
 
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -107,6 +108,7 @@ Runtime::~Runtime() {
 
 Result<void> Runtime::authorizeNetworkConnect(std::string_view host, uint16_t port) const {
     if ((options_.allowNetwork && endpoint_allowed(options_.networkAllowList, host, port)) ||
+        endpoint_allowed(dynamicNetworkAllowList_, host, port) ||
         endpoint_allowed(interactiveNetworkAllowList_, host, port)) {
         return {};
     }
@@ -121,6 +123,7 @@ Result<void> Runtime::authorizeNetworkConnect(std::string_view host, uint16_t po
 
 Result<void> Runtime::authorizeNetworkListen(std::string_view host, uint16_t port) const {
     if ((options_.allowListening && endpoint_allowed(options_.listenAllowList, host, port)) ||
+        endpoint_allowed(dynamicListenAllowList_, host, port) ||
         endpoint_allowed(interactiveListenAllowList_, host, port)) {
         return {};
     }
@@ -146,7 +149,7 @@ bool Runtime::interactivePermissionAllowed(const std::vector<std::string>& reque
 }
 
 Result<void> Runtime::authorizeUi() const {
-    if (options_.allowUi || interactivePermissionApproved_) {
+    if (options_.allowUi || dynamicUiAllowed_ || interactivePermissionApproved_) {
         return {};
     }
     if (interactivePermissionAllowed({"UI window access"})) {
@@ -159,7 +162,7 @@ Result<void> Runtime::authorizeUi() const {
 }
 
 Result<void> Runtime::authorizeGraphics() const {
-    if (options_.allowGraphics || interactivePermissionApproved_) {
+    if (options_.allowGraphics || dynamicGraphicsAllowed_ || interactivePermissionApproved_) {
         return {};
     }
     if (interactivePermissionAllowed({"graphics context access"})) {
@@ -173,6 +176,7 @@ Result<void> Runtime::authorizeGraphics() const {
 
 Result<void> Runtime::authorizeSharedMemory(std::string_view name) const {
     if ((options_.allowSharedMemory && prefix_allowed(options_.sharedMemoryAllowList, name)) ||
+        prefix_allowed(dynamicSharedMemoryAllowList_, name) ||
         interactivePermissionApproved_) {
         return {};
     }
@@ -274,6 +278,12 @@ std::optional<std::filesystem::path> Runtime::resolveFilesystemReadPath(
         }
     }
 
+    for (const auto& root : dynamicFilesystemReadRoots_) {
+        if (root_contains_target(root)) {
+            return canonicalTarget;
+        }
+    }
+
     if (options_.interactivePermissions) {
         fs::path requestedRoot = canonicalTarget;
         std::error_code statusEc;
@@ -289,6 +299,171 @@ std::optional<std::filesystem::path> Runtime::resolveFilesystemReadPath(
     }
 
     return std::nullopt;
+}
+
+bool Runtime::hasPermissions(const PermissionSet& requested) const {
+    if (requested.ui && !options_.allowUi && !dynamicUiAllowed_) {
+        return false;
+    }
+    if (requested.graphics && !options_.allowGraphics && !dynamicGraphicsAllowed_) {
+        return false;
+    }
+    for (const auto& item : requested.network) {
+        auto colon = item.rfind(':');
+        if (colon == std::string::npos) {
+            if (!endpoint_allowed(options_.networkAllowList, item, 0) &&
+                !endpoint_allowed(dynamicNetworkAllowList_, item, 0)) {
+                return false;
+            }
+            continue;
+        }
+        const auto host = item.substr(0, colon);
+        const auto portText = item.substr(colon + 1);
+        const uint16_t port = portText == "*" ? 0 : static_cast<uint16_t>(std::max(0, std::atoi(portText.c_str())));
+        if (!((options_.allowNetwork && endpoint_allowed(options_.networkAllowList, host, port)) ||
+              endpoint_allowed(dynamicNetworkAllowList_, host, port))) {
+            return false;
+        }
+    }
+    for (const auto& item : requested.listen) {
+        auto colon = item.rfind(':');
+        if (colon == std::string::npos) {
+            if (!endpoint_allowed(options_.listenAllowList, item, 0) &&
+                !endpoint_allowed(dynamicListenAllowList_, item, 0)) {
+                return false;
+            }
+            continue;
+        }
+        const auto host = item.substr(0, colon);
+        const auto portText = item.substr(colon + 1);
+        const uint16_t port = portText == "*" ? 0 : static_cast<uint16_t>(std::max(0, std::atoi(portText.c_str())));
+        if (!((options_.allowListening && endpoint_allowed(options_.listenAllowList, host, port)) ||
+              endpoint_allowed(dynamicListenAllowList_, host, port))) {
+            return false;
+        }
+    }
+    for (const auto& item : requested.sharedMemory) {
+        if (!((options_.allowSharedMemory && prefix_allowed(options_.sharedMemoryAllowList, item)) ||
+              prefix_allowed(dynamicSharedMemoryAllowList_, item))) {
+            return false;
+        }
+    }
+    for (const auto& item : requested.filesystemRead) {
+        bool ok = false;
+        for (const auto& root : options_.filesystemReadRoots) {
+            if (options_.allowFilesystemReads && path_contained_by(item.lexically_normal(), root.lexically_normal())) {
+                ok = true;
+                break;
+            }
+        }
+        for (const auto& root : dynamicFilesystemReadRoots_) {
+            if (path_contained_by(item.lexically_normal(), root.lexically_normal())) {
+                ok = true;
+                break;
+            }
+        }
+        if (!ok) return false;
+    }
+    return true;
+}
+
+Result<PermissionSet> Runtime::requestPermissions(const PermissionSet& requested) const {
+    PermissionSet granted;
+
+    auto endpoint_inside = [](const std::vector<std::string>& envelope, const std::string& item) {
+        auto colon = item.rfind(':');
+        if (colon == std::string::npos) {
+            for (const auto& entry : envelope) {
+                if (entry == item || entry == "*" || entry == item + ":*") return true;
+            }
+            return false;
+        }
+        const auto host = item.substr(0, colon);
+        const auto portText = item.substr(colon + 1);
+        const uint16_t port = portText == "*" ? 0 : static_cast<uint16_t>(std::max(0, std::atoi(portText.c_str())));
+        for (const auto& entry : envelope) {
+            if (portText == "*") {
+                if (entry == "*" || entry == host || entry == host + ":*" || entry == "*:*") return true;
+            } else if (endpoint_matches(entry, host, port)) {
+                return true;
+            }
+        }
+        return false;
+    };
+    auto path_inside = [](const std::vector<std::filesystem::path>& envelope, const std::filesystem::path& item) {
+        const auto normalized = item.lexically_normal();
+        for (const auto& root : envelope) {
+            if (path_contained_by(normalized, root.lexically_normal()) || normalized == root.lexically_normal()) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    auto deny = [](const std::string& item) {
+        return Error("permission_denied", "Requested permission is outside the approved policy: " + item);
+    };
+
+    if (requested.ui) {
+        if (options_.allowUi || dynamicUiAllowed_ ||
+            (options_.declaredPermissionsApproved && options_.declaredPermissions.ui)) {
+            dynamicUiAllowed_ = true;
+            granted.ui = true;
+        } else {
+            return deny("ui");
+        }
+    }
+    if (requested.graphics) {
+        if (options_.allowGraphics || dynamicGraphicsAllowed_ ||
+            (options_.declaredPermissionsApproved && options_.declaredPermissions.graphics)) {
+            dynamicGraphicsAllowed_ = true;
+            granted.graphics = true;
+        } else {
+            return deny("graphics");
+        }
+    }
+    for (const auto& item : requested.network) {
+        if ((options_.allowNetwork && endpoint_inside(options_.networkAllowList, item)) ||
+            endpoint_inside(dynamicNetworkAllowList_, item) ||
+            (options_.declaredPermissionsApproved && endpoint_inside(options_.declaredPermissions.network, item))) {
+            dynamicNetworkAllowList_.push_back(item);
+            granted.network.push_back(item);
+        } else {
+            return deny("network " + item);
+        }
+    }
+    for (const auto& item : requested.listen) {
+        if ((options_.allowListening && endpoint_inside(options_.listenAllowList, item)) ||
+            endpoint_inside(dynamicListenAllowList_, item) ||
+            (options_.declaredPermissionsApproved && endpoint_inside(options_.declaredPermissions.listen, item))) {
+            dynamicListenAllowList_.push_back(item);
+            granted.listen.push_back(item);
+        } else {
+            return deny("listen " + item);
+        }
+    }
+    for (const auto& item : requested.sharedMemory) {
+        if ((options_.allowSharedMemory && prefix_allowed(options_.sharedMemoryAllowList, item)) ||
+            prefix_allowed(dynamicSharedMemoryAllowList_, item) ||
+            (options_.declaredPermissionsApproved && prefix_allowed(options_.declaredPermissions.sharedMemory, item))) {
+            dynamicSharedMemoryAllowList_.push_back(item);
+            granted.sharedMemory.push_back(item);
+        } else {
+            return deny("sharedMemory " + item);
+        }
+    }
+    for (const auto& item : requested.filesystemRead) {
+        if ((options_.allowFilesystemReads && path_inside(options_.filesystemReadRoots, item)) ||
+            path_inside(dynamicFilesystemReadRoots_, item) ||
+            (options_.declaredPermissionsApproved && path_inside(options_.declaredPermissions.filesystemRead, item))) {
+            dynamicFilesystemReadRoots_.push_back(item);
+            granted.filesystemRead.push_back(item);
+        } else {
+            return deny("filesystemRead " + item.string());
+        }
+    }
+
+    return granted;
 }
 
 QuickJsModuleFactory Runtime::findQuickJsModule(std::string_view name) const {

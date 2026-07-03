@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -1177,6 +1178,136 @@ JSValue runtime_now(JSContext* ctx, JSValueConst, int, JSValueConst*) {
     return JS_NewFloat64(ctx, static_cast<double>(micros) / 1000.0);
 }
 
+bool read_permission_string_array(JSContext* ctx, JSValueConst obj, const char* name, std::vector<std::string>& out) {
+    JSValue value = JS_GetPropertyStr(ctx, obj, name);
+    if (JS_IsUndefined(value) || JS_IsNull(value)) {
+        JS_FreeValue(ctx, value);
+        return true;
+    }
+    if (JS_IsArray(ctx, value) <= 0) {
+        JS_FreeValue(ctx, value);
+        JS_ThrowTypeError(ctx, "permission property %s must be an array", name);
+        return false;
+    }
+    JSValue lengthValue = JS_GetPropertyStr(ctx, value, "length");
+    uint32_t length = 0;
+    JS_ToUint32(ctx, &length, lengthValue);
+    JS_FreeValue(ctx, lengthValue);
+    for (uint32_t i = 0; i < length; ++i) {
+        JSValue item = JS_GetPropertyUint32(ctx, value, i);
+        if (!JS_IsString(item)) {
+            JS_FreeValue(ctx, item);
+            JS_FreeValue(ctx, value);
+            JS_ThrowTypeError(ctx, "permission property %s entries must be strings", name);
+            return false;
+        }
+        out.push_back(js_string(ctx, item));
+        JS_FreeValue(ctx, item);
+    }
+    JS_FreeValue(ctx, value);
+    return true;
+}
+
+bool read_permission_bool(JSContext* ctx, JSValueConst obj, const char* name, bool& out) {
+    JSValue value = JS_GetPropertyStr(ctx, obj, name);
+    if (JS_IsUndefined(value) || JS_IsNull(value)) {
+        JS_FreeValue(ctx, value);
+        return true;
+    }
+    out = JS_ToBool(ctx, value) != 0;
+    JS_FreeValue(ctx, value);
+    return true;
+}
+
+bool permission_set_from_js(JSContext* ctx, JSValueConst value, PermissionSet& out) {
+    if (!JS_IsObject(value)) {
+        JS_ThrowTypeError(ctx, "permissions must be an object");
+        return false;
+    }
+    if (!read_permission_string_array(ctx, value, "network", out.network) ||
+        !read_permission_string_array(ctx, value, "listen", out.listen) ||
+        !read_permission_string_array(ctx, value, "sharedMemory", out.sharedMemory)) {
+        return false;
+    }
+    std::vector<std::string> roots;
+    if (!read_permission_string_array(ctx, value, "filesystemRead", roots)) {
+        return false;
+    }
+    for (const auto& root : roots) {
+        out.filesystemRead.emplace_back(root);
+    }
+    return read_permission_bool(ctx, value, "ui", out.ui) &&
+        read_permission_bool(ctx, value, "graphics", out.graphics);
+}
+
+JSValue permission_string_array(JSContext* ctx, const std::vector<std::string>& values) {
+    JSValue array = JS_NewArray(ctx);
+    uint32_t index = 0;
+    for (const auto& value : values) {
+        JS_SetPropertyUint32(ctx, array, index++, JS_NewString(ctx, value.c_str()));
+    }
+    return array;
+}
+
+JSValue permission_path_array(JSContext* ctx, const std::vector<std::filesystem::path>& values) {
+    JSValue array = JS_NewArray(ctx);
+    uint32_t index = 0;
+    for (const auto& value : values) {
+        const auto text = value.string();
+        JS_SetPropertyUint32(ctx, array, index++, JS_NewString(ctx, text.c_str()));
+    }
+    return array;
+}
+
+JSValue permission_result_object(JSContext* ctx, bool granted, const PermissionSet& effective, std::string error = {}) {
+    JSValue obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, obj, "granted", JS_NewBool(ctx, granted));
+    JS_SetPropertyStr(ctx, obj, "network", permission_string_array(ctx, effective.network));
+    JS_SetPropertyStr(ctx, obj, "listen", permission_string_array(ctx, effective.listen));
+    JS_SetPropertyStr(ctx, obj, "sharedMemory", permission_string_array(ctx, effective.sharedMemory));
+    JS_SetPropertyStr(ctx, obj, "filesystemRead", permission_path_array(ctx, effective.filesystemRead));
+    JS_SetPropertyStr(ctx, obj, "ui", JS_NewBool(ctx, effective.ui));
+    JS_SetPropertyStr(ctx, obj, "graphics", JS_NewBool(ctx, effective.graphics));
+    if (!error.empty()) {
+        JS_SetPropertyStr(ctx, obj, "error", JS_NewString(ctx, error.c_str()));
+    }
+    return obj;
+}
+
+JSValue runtime_request_permissions(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    Runtime* runtime = current_runtime(ctx);
+    if (!runtime) {
+        return JS_ThrowInternalError(ctx, "Runtime is unavailable");
+    }
+    if (argc < 1) {
+        return JS_ThrowTypeError(ctx, "wl2.runtime.requestPermissions(permissions) requires an object");
+    }
+    PermissionSet requested;
+    if (!permission_set_from_js(ctx, argv[0], requested)) {
+        return JS_EXCEPTION;
+    }
+    auto granted = runtime->requestPermissions(requested);
+    if (!granted) {
+        return permission_result_object(ctx, false, PermissionSet{}, granted.error().message());
+    }
+    return permission_result_object(ctx, true, granted.value());
+}
+
+JSValue runtime_has_permissions(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    Runtime* runtime = current_runtime(ctx);
+    if (!runtime) {
+        return JS_ThrowInternalError(ctx, "Runtime is unavailable");
+    }
+    if (argc < 1) {
+        return JS_ThrowTypeError(ctx, "wl2.runtime.hasPermissions(permissions) requires an object");
+    }
+    PermissionSet requested;
+    if (!permission_set_from_js(ctx, argv[0], requested)) {
+        return JS_EXCEPTION;
+    }
+    return JS_NewBool(ctx, runtime->hasPermissions(requested));
+}
+
 void add_runtime_api(JSContext* ctx) {
     JSValue global = JS_GetGlobalObject(ctx);
     JSValue wl2 = JS_GetPropertyStr(ctx, global, "wl2");
@@ -1203,6 +1334,10 @@ void add_runtime_api(JSContext* ctx) {
     JS_SetPropertyStr(ctx, runtimeObj, "modules", JS_NewCFunction(ctx, runtime_modules, "modules", 0));
     JS_SetPropertyStr(ctx, runtimeObj, "env", JS_NewCFunction(ctx, runtime_env, "env", 1));
     JS_SetPropertyStr(ctx, runtimeObj, "now", JS_NewCFunction(ctx, runtime_now, "now", 0));
+    JS_SetPropertyStr(ctx, runtimeObj, "requestPermissions",
+        JS_NewCFunction(ctx, runtime_request_permissions, "requestPermissions", 1));
+    JS_SetPropertyStr(ctx, runtimeObj, "hasPermissions",
+        JS_NewCFunction(ctx, runtime_has_permissions, "hasPermissions", 1));
 
     JS_SetPropertyStr(ctx, wl2, "runtime", runtimeObj);
     JS_FreeValue(ctx, wl2);

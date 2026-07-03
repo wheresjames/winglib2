@@ -43,6 +43,41 @@ set_tests_properties(scripts.wl2_asio_tcp_server PROPERTIES
     LABELS "js;asio;integration"
     TIMEOUT 30)
 
+# Single-file permission declaration: the leading `/* wl2 ... */` block defines
+# a loopback envelope that runtime requestPermissions() can turn into grants.
+add_test(NAME scripts.wl2_asio_declared_permissions
+    COMMAND
+        $<TARGET_FILE:wl2>
+        run
+        --allow-declared
+        ${CMAKE_CURRENT_SOURCE_DIR}/js/declared_permissions.test.js)
+set_tests_properties(scripts.wl2_asio_declared_permissions PROPERTIES
+    LABELS "js;asio;integration;permissions"
+    TIMEOUT 30)
+
+# The same script must not silently self-authorize in non-interactive mode.
+add_test(NAME scripts.wl2_asio_declared_permissions_denied
+    COMMAND
+        $<TARGET_FILE:wl2>
+        run
+        --no-permission-prompt
+        ${CMAKE_CURRENT_SOURCE_DIR}/js/declared_permissions.test.js)
+set_tests_properties(scripts.wl2_asio_declared_permissions_denied PROPERTIES
+    LABELS "js;asio;permissions"
+    WILL_FAIL TRUE
+    TIMEOUT 15)
+
+add_test(NAME scripts.wl2_asio_declared_permissions_trusted
+    COMMAND
+        ${CMAKE_COMMAND}
+        -DWL2_EXECUTABLE=$<TARGET_FILE:wl2>
+        -DSOURCE_SCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/js/declared_permissions.test.js
+        -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/declared_permissions_trusted
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/expect_declared_trust.cmake)
+set_tests_properties(scripts.wl2_asio_declared_permissions_trusted PROPERTIES
+    LABELS "js;asio;permissions"
+    TIMEOUT 30)
+
 # When the dynamic module is built, validate that the shared target exposes the
 # same identity/metadata as the static build through the runner's loader.
 if(TARGET wl2_asio)

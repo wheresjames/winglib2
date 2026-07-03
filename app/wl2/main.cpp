@@ -1,10 +1,11 @@
 #include "wl2/app_store.h"
-#include "wl2/wl2.h"
 #include "wl2/crash_report.h"
+#include "wl2/hash.h"
 #include "wl2/manifest.h"
 #include "wl2/module_deps.h"
 #include "wl2/module_resolver.h"
 #include "wl2/module_store.h"
+#include "wl2/wl2.h"
 
 #include <algorithm>
 #include <set>
@@ -14,6 +15,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -77,6 +79,11 @@ struct RunCommand {
     bool allowGraphics = false;
     bool allowSharedMemory = false;
     bool interactivePermissions = true;
+    bool allowDeclaredPermissions = false;
+    bool trustDeclaredPermissions = false;
+    bool hasDeclaredPermissions = false;
+    bool declaredPermissionsApproved = false;
+    wl2::PermissionSet declaredPermissions;
     std::vector<std::string> sharedMemoryAllowList;
     bool allowFilesystemReads = false;
     std::vector<std::filesystem::path> filesystemReadRoots;
@@ -106,7 +113,7 @@ struct TestCommand {
 void usage(std::ostream& out = std::cerr) {
     out
         << "usage:\n"
-        << "  wl2 run [--manifest wl2.yml] [--watch] [--stack-traces=auto|on|off] [--map-resource host:wl2:/prefix] [--trace-resources] [--load-module path] [--allow-module-shadow] [--allow ui,graphics,shared-memory[:prefix],filesystem-read[:root]] [--allow-network] [--network-allow host[:port]] [--allow-listen] [--listen-allow host[:port]] [--allow-ui] [--allow-graphics] [--allow-shared-memory] [--shared-memory-allow prefix] [--allow-filesystem-reads] [--filesystem-read-root root] [--no-permission-prompt] [--crash-report=off|auto|<path>] [--crash-report-dir dir] [script] [-- script-args...]\n"
+        << "  wl2 run [--manifest wl2.yml] [--watch] [--stack-traces=auto|on|off] [--map-resource host:wl2:/prefix] [--trace-resources] [--load-module path] [--allow-module-shadow] [--allow ui,graphics,shared-memory[:prefix],filesystem-read[:root]] [--allow-network] [--network-allow host[:port]] [--allow-listen] [--listen-allow host[:port]] [--allow-ui] [--allow-graphics] [--allow-shared-memory] [--shared-memory-allow prefix] [--allow-filesystem-reads] [--filesystem-read-root root] [--allow-declared] [--trust-declared] [--no-permission-prompt] [--crash-report=off|auto|<path>] [--crash-report-dir dir] [script] [-- script-args...]\n"
         << "  wl2 config [--manifest wl2.yml] [--json] [--map-resource host:wl2:/prefix] [--load-module path]\n"
         << "  wl2 resources <list|read|extract> [--manifest wl2.yml] [--map-resource host:wl2:/prefix] [executable] [path] [--out dir] [--raw]\n"
         << "  wl2 module validate <library-path>\n"
@@ -410,6 +417,456 @@ std::optional<std::string> read_text_file(const std::filesystem::path& path) {
     std::ostringstream out;
     out << in.rdbuf();
     return out.str();
+}
+
+std::string trim_text(std::string_view value) {
+    const auto begin = value.find_first_not_of(" \t\r\n");
+    if (begin == std::string_view::npos) {
+        return {};
+    }
+    const auto end = value.find_last_not_of(" \t\r\n");
+    return std::string(value.substr(begin, end - begin + 1));
+}
+
+std::string unquote_text(std::string value) {
+    value = trim_text(value);
+    if (value.size() >= 2
+        && ((value.front() == '"' && value.back() == '"') || (value.front() == '\'' && value.back() == '\''))) {
+        return value.substr(1, value.size() - 2);
+    }
+    return value;
+}
+
+std::string strip_yaml_comment(std::string_view line) {
+    bool singleQuoted = false;
+    bool doubleQuoted = false;
+    for (size_t i = 0; i < line.size(); ++i) {
+        const char ch = line[i];
+        if (ch == '\'' && !doubleQuoted) {
+            singleQuoted = !singleQuoted;
+        } else if (ch == '"' && !singleQuoted) {
+            doubleQuoted = !doubleQuoted;
+        } else if (ch == '#' && !singleQuoted && !doubleQuoted) {
+            return std::string(line.substr(0, i));
+        }
+    }
+    return std::string(line);
+}
+
+size_t leading_spaces(std::string_view line) {
+    size_t count = 0;
+    while (count < line.size() && line[count] == ' ') {
+        ++count;
+    }
+    return count;
+}
+
+std::vector<std::string> parse_inline_string_list(const std::string& value) {
+    std::vector<std::string> out;
+    std::string text = trim_text(value);
+    if (text.size() < 2 || text.front() != '[' || text.back() != ']') {
+        return out;
+    }
+    text = text.substr(1, text.size() - 2);
+    std::string item;
+    bool singleQuoted = false;
+    bool doubleQuoted = false;
+    for (size_t i = 0; i <= text.size(); ++i) {
+        const char ch = i < text.size() ? text[i] : ',';
+        if (ch == '\'' && !doubleQuoted) {
+            singleQuoted = !singleQuoted;
+            item.push_back(ch);
+        } else if (ch == '"' && !singleQuoted) {
+            doubleQuoted = !doubleQuoted;
+            item.push_back(ch);
+        } else if (ch == ',' && !singleQuoted && !doubleQuoted) {
+            auto trimmed = unquote_text(item);
+            if (!trimmed.empty()) {
+                out.push_back(trimmed);
+            }
+            item.clear();
+        } else {
+            item.push_back(ch);
+        }
+    }
+    return out;
+}
+
+std::string normalize_permission_key(std::string key) {
+    key = trim_text(key);
+    std::replace(key.begin(), key.end(), '-', '_');
+    for (char& ch : key) {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    if (key == "sharedmemory") return "shared_memory";
+    if (key == "filesystemread" || key == "fs_read") return "filesystem_read";
+    return key;
+}
+
+std::string expand_declared_permission_value(std::string value) {
+    if (const char* home = std::getenv("HOME")) {
+        size_t pos = 0;
+        while ((pos = value.find("${HOME}", pos)) != std::string::npos) {
+            value.replace(pos, std::string_view("${HOME}").size(), home);
+            pos += std::strlen(home);
+        }
+    }
+    return value;
+}
+
+bool append_declared_permission(RunCommand& command, const std::string& key, const std::string& value) {
+    if (value.empty()) {
+        return true;
+    }
+    const std::string expanded = expand_declared_permission_value(value);
+    const std::string normalized = normalize_permission_key(key);
+    command.hasDeclaredPermissions = true;
+    if (normalized == "network") {
+        command.declaredPermissions.network.push_back(expanded);
+        return true;
+    }
+    if (normalized == "listen" || normalized == "listening") {
+        command.declaredPermissions.listen.push_back(expanded);
+        return true;
+    }
+    if (normalized == "shared_memory") {
+        command.declaredPermissions.sharedMemory.push_back(expanded);
+        return true;
+    }
+    if (normalized == "filesystem_read") {
+        command.declaredPermissions.filesystemRead.emplace_back(expanded);
+        return true;
+    }
+    std::cerr << "unknown wl2 declared permission: " << key << '\n';
+    return false;
+}
+
+bool append_declared_permission_bool(RunCommand& command, const std::string& key, const std::string& value) {
+    const std::string normalized = normalize_permission_key(key);
+    const std::string boolValue = trim_text(value);
+    const bool enabled = boolValue == "true" || boolValue == "yes" || boolValue == "on";
+    if (!enabled) {
+        if (boolValue == "false" || boolValue == "no" || boolValue == "off") {
+            return true;
+        }
+        return false;
+    }
+    command.hasDeclaredPermissions = true;
+    if (normalized == "ui") {
+        command.declaredPermissions.ui = true;
+        return true;
+    }
+    if (normalized == "graphics") {
+        command.declaredPermissions.graphics = true;
+        return true;
+    }
+    return false;
+}
+
+std::optional<std::string> leading_wl2_block(const std::string& source) {
+    size_t pos = 0;
+    if (source.rfind("#!", 0) == 0) {
+        const auto newline = source.find('\n');
+        pos = newline == std::string::npos ? source.size() : newline + 1;
+    }
+    while (pos < source.size()) {
+        while (pos < source.size() && std::isspace(static_cast<unsigned char>(source[pos]))) {
+            ++pos;
+        }
+        if (source.compare(pos, 2, "//") == 0) {
+            const auto newline = source.find('\n', pos + 2);
+            pos = newline == std::string::npos ? source.size() : newline + 1;
+            continue;
+        }
+        if (source.compare(pos, 2, "/*") == 0) {
+            const auto close = source.find("*/", pos + 2);
+            if (close == std::string::npos) {
+                return std::nullopt;
+            }
+            const std::string firstLine = trim_text(std::string_view(source).substr(pos, source.find('\n', pos) - pos));
+            const bool isWl2 = firstLine == "/* wl2" || firstLine == "/** wl2";
+            if (isWl2) {
+                const auto bodyStart = source.find('\n', pos);
+                if (bodyStart == std::string::npos || bodyStart > close) {
+                    return std::string{};
+                }
+                return source.substr(bodyStart + 1, close - bodyStart - 1);
+            }
+            pos = close + 2;
+            continue;
+        }
+        break;
+    }
+    return std::nullopt;
+}
+
+bool apply_declared_permissions(RunCommand& command, const std::string& block) {
+    std::istringstream in(block);
+    std::string line;
+    bool inPermissions = false;
+    std::string currentListKey;
+    size_t currentListIndent = 0;
+    int lineNumber = 0;
+    while (std::getline(in, line)) {
+        ++lineNumber;
+        line = strip_yaml_comment(line);
+        const std::string trimmed = trim_text(line);
+        if (trimmed.empty()) {
+            continue;
+        }
+        const size_t indent = leading_spaces(line);
+        if (!inPermissions) {
+            if (trimmed == "permissions:") {
+                inPermissions = true;
+                continue;
+            }
+            std::cerr << "invalid wl2 front matter at line " << lineNumber
+                      << ": expected permissions:\n";
+            return false;
+        }
+        if (!currentListKey.empty() && indent > currentListIndent && trimmed.rfind("-", 0) == 0) {
+            if (!append_declared_permission(command, currentListKey, unquote_text(trimmed.substr(1)))) {
+                return false;
+            }
+            continue;
+        }
+        currentListKey.clear();
+        const auto colon = trimmed.find(':');
+        if (colon == std::string::npos) {
+            std::cerr << "invalid wl2 permission declaration at line " << lineNumber << '\n';
+            return false;
+        }
+        const std::string key = trimmed.substr(0, colon);
+        const std::string value = trim_text(std::string_view(trimmed).substr(colon + 1));
+        if (value.empty()) {
+            currentListKey = key;
+            currentListIndent = indent;
+            continue;
+        }
+        if (value.front() == '[') {
+            for (const auto& item : parse_inline_string_list(value)) {
+                if (!append_declared_permission(command, key, item)) {
+                    return false;
+                }
+            }
+            continue;
+        }
+        if (append_declared_permission_bool(command, key, value)) {
+            continue;
+        }
+        if (!append_declared_permission(command, key, unquote_text(value))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::string display_script_path(const std::string& script) {
+    if (script.rfind("file:", 0) == 0) {
+        return script.substr(5);
+    }
+    return script;
+}
+
+std::optional<std::filesystem::path> script_file_path(const RunCommand& command) {
+    std::string pathText = command.script;
+    if (pathText.rfind("wl2:", 0) == 0) {
+        return std::nullopt;
+    }
+    if (pathText.rfind("file:", 0) == 0) {
+        pathText = pathText.substr(5);
+    }
+    return std::filesystem::path(pathText);
+}
+
+bool load_declared_permissions(RunCommand& command) {
+    auto scriptPath = script_file_path(command);
+    if (!scriptPath) {
+        return true;
+    }
+    auto source = read_text_file(*scriptPath);
+    if (!source) {
+        // Runtime will report the actual load error later.
+        return true;
+    }
+    auto block = leading_wl2_block(*source);
+    if (!block) {
+        return true;
+    }
+    return apply_declared_permissions(command, *block);
+}
+
+struct ScriptTrustIdentity {
+    std::filesystem::path path;
+    std::string checksum;
+};
+
+std::optional<ScriptTrustIdentity> script_trust_identity(const RunCommand& command) {
+    auto scriptPath = script_file_path(command);
+    if (!scriptPath) {
+        return std::nullopt;
+    }
+    std::error_code ec;
+    auto canonical = std::filesystem::weakly_canonical(*scriptPath, ec);
+    if (ec) {
+        canonical = std::filesystem::absolute(*scriptPath, ec);
+        if (ec) {
+            canonical = *scriptPath;
+        }
+    }
+    auto checksum = wl2::sha256File(canonical);
+    if (!checksum) {
+        return std::nullopt;
+    }
+    return ScriptTrustIdentity{canonical, checksum.value()};
+}
+
+std::optional<std::filesystem::path> wl2_config_home() {
+    if (const char* xdg = std::getenv("XDG_CONFIG_HOME"); xdg && *xdg) {
+        return std::filesystem::path(xdg) / "wl2";
+    }
+    if (const char* home = std::getenv("HOME"); home && *home) {
+        return std::filesystem::path(home) / ".config" / "wl2";
+    }
+    return std::nullopt;
+}
+
+std::optional<std::filesystem::path> declared_trust_store_path() {
+    auto home = wl2_config_home();
+    if (!home) {
+        return std::nullopt;
+    }
+    return *home / "script-permissions.v1";
+}
+
+bool declared_trust_matches(const ScriptTrustIdentity& identity) {
+    auto storePath = declared_trust_store_path();
+    if (!storePath) {
+        return false;
+    }
+    std::ifstream in(*storePath);
+    if (!in) {
+        return false;
+    }
+    const std::string pathText = identity.path.string();
+    std::string line;
+    while (std::getline(in, line)) {
+        line = trim_text(line);
+        if (line.empty() || line.front() == '#') {
+            continue;
+        }
+        const auto tab = line.find('\t');
+        if (tab == std::string::npos) {
+            continue;
+        }
+        if (line.substr(0, tab) == identity.checksum && line.substr(tab + 1) == pathText) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool remember_declared_trust(const ScriptTrustIdentity& identity) {
+    auto storePath = declared_trust_store_path();
+    if (!storePath) {
+        std::cerr << "cannot persist declared permission approval: no config directory is available\n";
+        return false;
+    }
+    std::error_code ec;
+    std::filesystem::create_directories(storePath->parent_path(), ec);
+    if (ec) {
+        std::cerr << "cannot persist declared permission approval: " << ec.message() << '\n';
+        return false;
+    }
+    if (declared_trust_matches(identity)) {
+        return true;
+    }
+    std::ofstream out(*storePath, std::ios::app);
+    if (!out) {
+        std::cerr << "cannot persist declared permission approval: unable to write "
+                  << storePath->string() << '\n';
+        return false;
+    }
+    out << identity.checksum << '\t' << identity.path.string() << '\n';
+    return true;
+}
+
+std::vector<std::string> declared_permission_lines(const RunCommand& command) {
+    std::vector<std::string> lines;
+    if (command.declaredPermissions.ui) {
+        lines.push_back("UI window access");
+    }
+    if (command.declaredPermissions.graphics) {
+        lines.push_back("graphics context access");
+    }
+    for (const auto& item : command.declaredPermissions.network) {
+        lines.push_back("network connections matching " + item);
+    }
+    for (const auto& item : command.declaredPermissions.listen) {
+        lines.push_back("network listeners matching " + item);
+    }
+    for (const auto& item : command.declaredPermissions.sharedMemory) {
+        lines.push_back("shared-memory names starting with " + item);
+    }
+    for (const auto& item : command.declaredPermissions.filesystemRead) {
+        lines.push_back("filesystem reads under " + item.string());
+    }
+    return lines;
+}
+
+bool approve_declared_permissions(RunCommand& command) {
+    if (!command.hasDeclaredPermissions) {
+        return true;
+    }
+
+    const auto identity = script_trust_identity(command);
+    if (identity && declared_trust_matches(*identity)) {
+        command.declaredPermissionsApproved = true;
+        return true;
+    }
+
+    if (command.allowDeclaredPermissions) {
+        command.declaredPermissionsApproved = true;
+        if (command.trustDeclaredPermissions) {
+            if (!identity) {
+                std::cerr << "cannot persist declared permission approval for "
+                          << display_script_path(command.script)
+                          << ": unable to hash a filesystem script\n";
+                return false;
+            }
+            remember_declared_trust(*identity);
+        }
+        return true;
+    }
+    if (!command.interactivePermissions || !stdin_is_terminal()) {
+        std::cerr << display_script_path(command.script)
+                  << " declares host permissions; rerun with --allow-declared, --trust-declared, or allow them explicitly.\n";
+        return false;
+    }
+    std::cerr << display_script_path(command.script) << " declares host permissions:\n";
+    for (const auto& line : declared_permission_lines(command)) {
+        std::cerr << "  - " << line << '\n';
+    }
+    std::cerr << "Allow these permissions? [y]es/[a]lways/[n]o ";
+    std::string answer;
+    if (!std::getline(std::cin, answer)) {
+        return false;
+    }
+    answer = trim_text(answer);
+    if (answer == "a" || answer == "A" || answer == "always" || answer == "ALWAYS") {
+        if (!identity) {
+            std::cerr << "cannot persist declared permission approval for "
+                      << display_script_path(command.script)
+                      << ": unable to hash a filesystem script\n";
+            return false;
+        }
+        remember_declared_trust(*identity);
+        command.declaredPermissionsApproved = true;
+        return true;
+    }
+    command.declaredPermissionsApproved =
+        answer == "y" || answer == "Y" || answer == "yes" || answer == "YES";
+    return command.declaredPermissionsApproved;
 }
 
 std::optional<std::string> json_string_field(const std::string& text, const std::string& key) {
@@ -751,6 +1208,15 @@ std::optional<RunCommand> parse_run_command(int argc, char** argv, int start, bo
             command.interactivePermissions = false;
             continue;
         }
+        if (arg == "--allow-declared") {
+            command.allowDeclaredPermissions = true;
+            continue;
+        }
+        if (arg == "--trust-declared" || arg == "--allow-declared-always") {
+            command.allowDeclaredPermissions = true;
+            command.trustDeclaredPermissions = true;
+            continue;
+        }
         if (arg == "--shared-memory-allow") {
             if (++i >= argc) {
                 std::cerr << "--shared-memory-allow requires a name prefix\n";
@@ -1033,6 +1499,12 @@ std::optional<RunCommand> parse_run_command(int argc, char** argv, int start, bo
         usage();
         return std::nullopt;
     }
+    if (!load_declared_permissions(command)) {
+        return std::nullopt;
+    }
+    if (!approve_declared_permissions(command)) {
+        return std::nullopt;
+    }
     return command;
 }
 
@@ -1079,6 +1551,8 @@ int run_script(wl2::RuntimeOptions options, const RunCommand& command) {
     options.sharedMemoryAllowList = command.sharedMemoryAllowList;
     options.allowFilesystemReads = command.allowFilesystemReads;
     options.filesystemReadRoots = command.filesystemReadRoots;
+    options.declaredPermissions = command.declaredPermissions;
+    options.declaredPermissionsApproved = command.declaredPermissionsApproved;
     options.interactivePermissions = command.interactivePermissions && stdin_is_terminal();
     wl2::Runtime runtime(std::move(options));
     auto result = runtime.runModule(command.script);

@@ -33,6 +33,16 @@ struct DynamicModuleSpec {
     bool allowShadow = false;
 };
 
+/// Host permission ranges grouped by capability.
+struct PermissionSet {
+    std::vector<std::string> network;
+    std::vector<std::string> listen;
+    std::vector<std::string> sharedMemory;
+    std::vector<std::filesystem::path> filesystemRead;
+    bool ui = false;
+    bool graphics = false;
+};
+
 /**
  * @brief Runtime construction options.
  *
@@ -136,6 +146,15 @@ struct RuntimeOptions {
     /// true. Entries are matched by string prefix. An empty list denies all
     /// names even when allowSharedMemory is true.
     std::vector<std::string> sharedMemoryAllowList;
+
+    /// Maximum host permission envelope declared by the script front matter.
+    /// These ranges do not grant access by themselves; scripts request concrete
+    /// grants with `wl2.runtime.requestPermissions()`.
+    PermissionSet declaredPermissions;
+
+    /// True when the host has approved using declaredPermissions as an envelope
+    /// for this run.
+    bool declaredPermissionsApproved = false;
 
     /// Allow denied capability checks to prompt on the console when the host CLI
     /// is interactive. Disabled by embedders unless explicitly requested.
@@ -301,6 +320,21 @@ public:
     Result<void> authorizeSharedMemory(std::string_view name) const;
 
     /**
+     * @brief Request concrete host permission grants for this run.
+     *
+     * Requests inside an approved declared permission envelope are granted
+     * without additional prompting. Requests already covered by CLI grants are
+     * also considered granted. Requests outside the effective policy are denied;
+     * regular per-operation checks remain the final enforcement layer.
+     */
+    Result<PermissionSet> requestPermissions(const PermissionSet& requested) const;
+
+    /**
+     * @brief Check whether all requested permissions are currently effective.
+     */
+    bool hasPermissions(const PermissionSet& requested) const;
+
+    /**
      * @brief Shared host support for native asynchronous module work.
      * @return Mutable async host owned by the runtime.
      */
@@ -359,6 +393,12 @@ private:
     mutable std::vector<std::string> interactiveNetworkAllowList_;
     mutable std::vector<std::string> interactiveListenAllowList_;
     mutable std::vector<std::filesystem::path> interactiveFilesystemReadRoots_;
+    mutable std::vector<std::string> dynamicSharedMemoryAllowList_;
+    mutable std::vector<std::string> dynamicNetworkAllowList_;
+    mutable std::vector<std::string> dynamicListenAllowList_;
+    mutable std::vector<std::filesystem::path> dynamicFilesystemReadRoots_;
+    mutable bool dynamicUiAllowed_ = false;
+    mutable bool dynamicGraphicsAllowed_ = false;
 };
 
 } // namespace wl2

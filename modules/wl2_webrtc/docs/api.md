@@ -222,7 +222,7 @@ Methods:
 - `addTrack({ media, codec, payloadType, clockRate?, sendPacketBufferName, mid? }) -> Track`
 - `start() -> this` — emit exactly one offer covering all added tracks
 - `handleSignal(message)` — apply `answer` / `candidate`, or `pump` / `stop`
-- `pump()` — drain peer events, forward local description/candidates, send RTP
+- `pump({ timeoutMs = 0, max = 64 } = {})` — drain peer events, forward local description/candidates, send RTP
 - `onState(cb)` / `onStatus(cb)` / `onPump(cb)` / `onClose(cb) -> this`
 - `notify(level, message)` — send a `{ type: "status" }` to the remote
 - `stats() -> { sentPackets, sentBytes, trackOpen, selectedCandidatePair }`

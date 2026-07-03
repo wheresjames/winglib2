@@ -253,11 +253,14 @@ const char* const kWebRtcHelpersJs = R"WLRTC(
       this.pump();
     }
 
-    pump() {
+    pump(options) {
       if (this.closed) return;
+      var opts = options || {};
+      var timeoutMs = opts.timeoutMs || 0;
+      var maxEvents = opts.max || 64;
       for (var hook of this._onPump) { try { hook(this); } catch (e) {} }
       if (this.closed) return;
-      for (var ev of this.pc.poll({ timeoutMs: 0, max: 64 })) {
+      for (var ev of this.pc.poll({ timeoutMs: timeoutMs, max: maxEvents })) {
         if (ev.type === "local-description") {
           if (ev.description && ev.description.type === "offer") {
             this.signal({ type: "offer", description: ev.description });

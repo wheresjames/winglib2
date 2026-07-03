@@ -1,0 +1,3 @@
+schema: wl2.module-source.v1
+provides: wl2:yml
+category: extended

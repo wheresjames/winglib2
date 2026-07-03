@@ -17,6 +17,11 @@ add_test(NAME webrtc.helpers
         ${CMAKE_CURRENT_SOURCE_DIR}/js/helpers.test.js)
 set_tests_properties(webrtc.helpers PROPERTIES
     LABELS "webrtc;js;integration;membus"
+    # This exercises real libdatachannel offer/ICE generation with fixed poll
+    # budgets. Under a saturated parallel run (ctest -j <many>) the async offer
+    # can be starved past those budgets, flaking "offer emitted". Run it serially
+    # so it always gets enough CPU; it is short, so the cost is negligible.
+    RUN_SERIAL TRUE
     TIMEOUT 60)
 
 if(TARGET wl2_gstreamer_static)

@@ -41,7 +41,11 @@ check("SignalingHub is a class", typeof SignalingHub === "function");
   });
   s.addTrack({ media: "video", codec: "VP8", payloadType: 96, sendPacketBufferName: name });
   s.start();
-  for (let i = 0; i < 10 && !offer; i++) { s.pc.poll({ timeoutMs: 100 }); s.pump(); }
+  // Offer generation is asynchronous (local description + ICE setup) and the very
+  // first one in a process can lag while libdatachannel spins up. Poll with a
+  // generous, early-exiting budget (as the loopback section below does) so this
+  // does not flake; it returns immediately once the offer is emitted.
+  for (let i = 0; i < 300 && !offer; i++) s.pump({ timeoutMs: 10 });
   check("offer emitted", !!offer && offer.type === "offer");
   check("offer advertises VP8 video", !!offer && /m=video/.test(offer.sdp) && /VP8/i.test(offer.sdp));
   void pb;

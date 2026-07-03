@@ -4,10 +4,18 @@ file(MAKE_DIRECTORY "${WORK_DIR}")
 set(ENV{XDG_CONFIG_HOME} "${WORK_DIR}/xdg")
 set(_trust_json "${WORK_DIR}/xdg/wl2/trust.json")
 
+# Feed every wl2 invocation an empty stdin so it is deterministically
+# non-interactive. Otherwise, when ctest runs attached to a terminal, the child
+# inherits that tty and `trust clear` (without --yes) would block on its
+# confirmation prompt instead of refusing.
+set(_empty_stdin "${WORK_DIR}/empty-stdin")
+file(WRITE "${_empty_stdin}" "")
+
 function(trust_run)
     cmake_parse_arguments(ARG "" "RESULT;OUTPUT;ERROR" "COMMAND" ${ARGN})
     execute_process(
         COMMAND "${WL2_EXECUTABLE}" ${ARG_COMMAND}
+        INPUT_FILE "${_empty_stdin}"
         RESULT_VARIABLE _rc
         OUTPUT_VARIABLE _out
         ERROR_VARIABLE _err)

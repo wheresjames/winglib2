@@ -8,8 +8,11 @@
 - `scene.close()`
 
 `publishTo()` writes RGBA8/sRGB, premultiplied-alpha, top-left-origin frames to a
-libmembus `memvid` ring. It requires the runtime shared-memory capability for the
-target name (and the graphics capability when a renderer is present).
+libmembus `memvid` ring. Each render writes the current producer slot and then
+commits it by advancing the ring sequence, so consumers can read the latest
+committed frame using the standard ring contract. It requires the runtime
+shared-memory capability for the target name (and the graphics capability when a
+renderer is present).
 
 With Magnum/Corrade enabled, `publishTo()` and `scene.tick()` use the native GPU
 renderer when `--allow-graphics` is present and a windowless GL context can be

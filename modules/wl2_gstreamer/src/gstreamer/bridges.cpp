@@ -776,20 +776,48 @@ JSValue pipeline_push_video_frame(JSContext* ctx, JSValueConst thisVal, int argc
             "No attached video source" + (elementName.empty() ? std::string() : " named '" + elementName + "'"));
     }
     int64_t slot = 0;
+    bool latest = false;
+    int64_t retries = 3;
     if (argc > 0) {
         option_int(ctx, argv[0], "slot", slot);
+        latest = option_bool(ctx, argv[0], "latest", false);
+        option_int(ctx, argv[0], "retries", retries);
+        retries = std::max<int64_t>(1, retries);
+        if (latest) {
+            slot = bridge->buffer.pointer(-1);
+        }
     }
-    auto view = bridge->buffer.frame(slot);
-    if (!view || !view.value().data) {
-        return throw_gst_error(ctx, "gstreamer_membus_failed", "pushVideoFrame",
-            "Could not read video frame slot " + std::to_string(slot));
+    GstBuffer* gbuf = nullptr;
+    int64_t sequence = -1;
+    for (int64_t attempt = 0; attempt < (latest ? retries : 1); ++attempt) {
+        if (latest) {
+            slot = bridge->buffer.pointer(-1);
+            sequence = bridge->buffer.frameSequence(slot);
+            if (slot < 0 || sequence < 0) {
+                return throw_gst_error(ctx, "gstreamer_membus_failed", "pushVideoFrame",
+                    "No committed video frame is available");
+            }
+        }
+        auto view = bridge->buffer.frame(slot);
+        if (!view || !view.value().data) {
+            return throw_gst_error(ctx, "gstreamer_membus_failed", "pushVideoFrame",
+                "Could not read video frame slot " + std::to_string(slot));
+        }
+        gbuf = gst_buffer_new_allocate(nullptr, view.value().size, nullptr);
+        if (!gbuf) {
+            return throw_gst_error(ctx, "gstreamer_membus_failed", "pushVideoFrame", "Failed to allocate GstBuffer");
+        }
+        gst_buffer_fill(gbuf, 0, view.value().data, view.value().size);
+        if (!latest || bridge->buffer.frameSequence(slot) == sequence) {
+            break;
+        }
+        gst_buffer_unref(gbuf);
+        gbuf = nullptr;
     }
-    const size_t size = view.value().size;
-    GstBuffer* gbuf = gst_buffer_new_allocate(nullptr, size, nullptr);
     if (!gbuf) {
-        return throw_gst_error(ctx, "gstreamer_membus_failed", "pushVideoFrame", "Failed to allocate GstBuffer");
+        return throw_gst_error(ctx, "gstreamer_membus_failed", "pushVideoFrame",
+            "Latest video frame changed while it was being copied");
     }
-    gst_buffer_fill(gbuf, 0, view.value().data, size);
 
     const int64_t duration = bridge->fps > 0 ? GST_SECOND / bridge->fps : 0;
     int64_t pts = bridge->frameIndex * duration;
@@ -819,6 +847,10 @@ JSValue pipeline_push_video_frame(JSContext* ctx, JSValueConst thisVal, int argc
     bridge->pushed.fetch_add(1);
     JSValue result = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, result, "ok", JS_NewBool(ctx, true));
+    JS_SetPropertyStr(ctx, result, "slot", JS_NewInt64(ctx, slot));
+    if (latest) {
+        JS_SetPropertyStr(ctx, result, "sequence", JS_NewInt64(ctx, sequence));
+    }
     JS_SetPropertyStr(ctx, result, "pts", JS_NewInt64(ctx, pts));
     return result;
 }
@@ -838,20 +870,49 @@ JSValue pipeline_push_audio_samples(JSContext* ctx, JSValueConst thisVal, int ar
             "No attached audio source" + (elementName.empty() ? std::string() : " named '" + elementName + "'"));
     }
     int64_t slot = 0;
+    bool latest = false;
+    int64_t retries = 3;
     if (argc > 0) {
         option_int(ctx, argv[0], "slot", slot);
-    }
-    auto view = bridge->buffer.buffer(slot);
-    if (!view || !view.value().data) {
-        return throw_gst_error(ctx, "gstreamer_membus_failed", "pushAudioSamples",
-            "Could not read audio slot " + std::to_string(slot));
+        latest = option_bool(ctx, argv[0], "latest", false);
+        option_int(ctx, argv[0], "retries", retries);
+        retries = std::max<int64_t>(1, retries);
+        if (latest) {
+            slot = bridge->buffer.pointer(-1);
+        }
     }
     const size_t size = static_cast<size_t>(bridge->buffer.bufferSize());
-    GstBuffer* gbuf = gst_buffer_new_allocate(nullptr, size, nullptr);
-    if (!gbuf) {
-        return throw_gst_error(ctx, "gstreamer_membus_failed", "pushAudioSamples", "Failed to allocate GstBuffer");
+    GstBuffer* gbuf = nullptr;
+    int64_t sequence = -1;
+    for (int64_t attempt = 0; attempt < (latest ? retries : 1); ++attempt) {
+        if (latest) {
+            slot = bridge->buffer.pointer(-1);
+            sequence = bridge->buffer.frameSequence(slot);
+            if (slot < 0 || sequence < 0) {
+                return throw_gst_error(ctx, "gstreamer_membus_failed", "pushAudioSamples",
+                    "No committed audio buffer is available");
+            }
+        }
+        auto view = bridge->buffer.buffer(slot);
+        if (!view || !view.value().data) {
+            return throw_gst_error(ctx, "gstreamer_membus_failed", "pushAudioSamples",
+                "Could not read audio slot " + std::to_string(slot));
+        }
+        gbuf = gst_buffer_new_allocate(nullptr, size, nullptr);
+        if (!gbuf) {
+            return throw_gst_error(ctx, "gstreamer_membus_failed", "pushAudioSamples", "Failed to allocate GstBuffer");
+        }
+        gst_buffer_fill(gbuf, 0, view.value().data, size);
+        if (!latest || bridge->buffer.frameSequence(slot) == sequence) {
+            break;
+        }
+        gst_buffer_unref(gbuf);
+        gbuf = nullptr;
     }
-    gst_buffer_fill(gbuf, 0, view.value().data, size);
+    if (!gbuf) {
+        return throw_gst_error(ctx, "gstreamer_membus_failed", "pushAudioSamples",
+            "Latest audio buffer changed while it was being copied");
+    }
 
     const int64_t bytesPerFrame = bridge->buffer.channels() * bridge->buffer.bytesPerSample();
     const int64_t sampleCount = bytesPerFrame > 0 ? static_cast<int64_t>(size) / bytesPerFrame : 0;
@@ -884,6 +945,10 @@ JSValue pipeline_push_audio_samples(JSContext* ctx, JSValueConst thisVal, int ar
     bridge->pushed.fetch_add(1);
     JSValue result = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, result, "ok", JS_NewBool(ctx, true));
+    JS_SetPropertyStr(ctx, result, "slot", JS_NewInt64(ctx, slot));
+    if (latest) {
+        JS_SetPropertyStr(ctx, result, "sequence", JS_NewInt64(ctx, sequence));
+    }
     JS_SetPropertyStr(ctx, result, "samples", JS_NewInt64(ctx, sampleCount));
     return result;
 }

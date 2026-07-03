@@ -209,10 +209,10 @@ bool authorize_shared_memory_name(JSContext* ctx, const char* operation, const s
 }
 
 rtc::Description::Media make_media_description(const std::string& media, const std::string& codec,
-    int payloadType, int clockRate) {
+    int payloadType, int clockRate, const std::string& mid) {
     const std::string c = lower_ascii(codec);
     if (media == "audio") {
-        rtc::Description::Audio desc("audio", rtc::Description::Direction::SendOnly);
+        rtc::Description::Audio desc(mid.empty() ? "audio" : mid, rtc::Description::Direction::SendOnly);
         if (c == "opus") desc.addOpusCodec(payloadType);
         else if (c == "pcma") desc.addPCMACodec(payloadType);
         else if (c == "pcmu") desc.addPCMUCodec(payloadType);
@@ -221,7 +221,7 @@ rtc::Description::Media make_media_description(const std::string& media, const s
         return desc;
     }
 
-    rtc::Description::Video desc("video", rtc::Description::Direction::SendOnly);
+    rtc::Description::Video desc(mid.empty() ? "video" : mid, rtc::Description::Direction::SendOnly);
     if (c == "h264") desc.addH264Codec(payloadType);
     else if (c == "h265" || c == "hevc") desc.addH265Codec(payloadType);
     else if (c == "vp8") desc.addVP8Codec(payloadType);
@@ -619,10 +619,11 @@ JSValue pc_add_track(JSContext* ctx, JSValueConst thisVal, int argc, JSValueCons
         return throw_webrtc_error(ctx, "webrtc_invalid_argument", "addTrack",
             "addTrack(options) requires media, codec, payloadType, and sendPacketBufferName");
     }
-    std::string media, codec, bufferName;
+    std::string media, codec, bufferName, mid;
     int64_t payloadType = 96;
     int64_t clockRate = 90000;
     int64_t trackId = 0;
+    bool autoOffer = true;
     if (!option_string(ctx, argv[0], "media", media) || !option_string(ctx, argv[0], "codec", codec)
         || !option_string(ctx, argv[0], "sendPacketBufferName", bufferName)) {
         return throw_webrtc_error(ctx, "webrtc_invalid_argument", "addTrack",
@@ -636,6 +637,10 @@ JSValue pc_add_track(JSContext* ctx, JSValueConst thisVal, int argc, JSValueCons
     option_int(ctx, argv[0], "payloadType", payloadType);
     option_int(ctx, argv[0], "clockRate", clockRate);
     option_int(ctx, argv[0], "track", trackId);
+    autoOffer = option_bool(ctx, argv[0], "autoOffer", autoOffer);
+    // Optional explicit m-line id. Bind a send track to the remote offer's mid so
+    // an answerer can send on the negotiated line (default "video"/"audio").
+    option_string(ctx, argv[0], "mid", mid);
     if (payloadType < 0 || payloadType > 127) {
         return throw_webrtc_error(ctx, "webrtc_invalid_argument", "addTrack", "payloadType must be 0..127");
     }
@@ -650,9 +655,9 @@ JSValue pc_add_track(JSContext* ctx, JSValueConst thisVal, int argc, JSValueCons
 
     std::shared_ptr<rtc::Track> track;
     try {
-        auto desc = make_media_description(media, codec, static_cast<int>(payloadType), static_cast<int>(clockRate));
+        auto desc = make_media_description(media, codec, static_cast<int>(payloadType), static_cast<int>(clockRate), mid);
         track = box->pc->addTrack(std::move(desc));
-        if (box->pc->signalingState() == rtc::PeerConnection::SignalingState::Stable) {
+        if (autoOffer && box->pc->signalingState() == rtc::PeerConnection::SignalingState::Stable) {
             box->pc->setLocalDescription(rtc::Description::Type::Offer);
         }
     } catch (const std::exception& e) {
@@ -684,6 +689,54 @@ JSValue pc_set_remote_description(JSContext* ctx, JSValueConst thisVal, int argc
         box->pc->setRemoteDescription(type.empty() ? rtc::Description(sdp) : rtc::Description(sdp, type));
     } catch (const std::exception& e) {
         return throw_webrtc_error(ctx, "webrtc_failed", "setRemoteDescription", e.what());
+    }
+    JSValue obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, obj, "ok", JS_NewBool(ctx, true));
+    return obj;
+}
+
+JSValue pc_set_local_description(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv) {
+    PcBox* box = live_pc(ctx, thisVal, "setLocalDescription");
+    if (!box) return JS_EXCEPTION;
+    std::string type = "offer";
+    if (argc > 0) {
+        if (JS_IsString(argv[0])) {
+            const char* text = JS_ToCString(ctx, argv[0]);
+            if (!text) return JS_EXCEPTION;
+            type = text;
+            JS_FreeCString(ctx, text);
+        } else if (JS_IsObject(argv[0])) {
+            option_string(ctx, argv[0], "type", type);
+        } else {
+            return throw_webrtc_error(ctx, "webrtc_invalid_argument", "setLocalDescription",
+                "setLocalDescription(type) expects 'offer' or 'answer'");
+        }
+    }
+    type = lower_ascii(type);
+    rtc::Description::Type descType;
+    if (type == "offer") {
+        descType = rtc::Description::Type::Offer;
+    } else if (type == "answer") {
+        descType = rtc::Description::Type::Answer;
+    } else {
+        return throw_webrtc_error(ctx, "webrtc_invalid_argument", "setLocalDescription",
+            "description type must be 'offer' or 'answer'");
+    }
+    const auto signaling = box->pc->signalingState();
+    if (descType == rtc::Description::Type::Answer &&
+        signaling != rtc::PeerConnection::SignalingState::HaveRemoteOffer) {
+        return throw_webrtc_error(ctx, "webrtc_invalid_argument", "setLocalDescription",
+            "answer requires signaling state have-remote-offer");
+    }
+    if (descType == rtc::Description::Type::Offer &&
+        signaling != rtc::PeerConnection::SignalingState::Stable) {
+        return throw_webrtc_error(ctx, "webrtc_invalid_argument", "setLocalDescription",
+            "offer requires signaling state stable");
+    }
+    try {
+        box->pc->setLocalDescription(descType);
+    } catch (const std::exception& e) {
+        return throw_webrtc_error(ctx, "webrtc_failed", "setLocalDescription", e.what());
     }
     JSValue obj = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, obj, "ok", JS_NewBool(ctx, true));
@@ -875,6 +928,7 @@ void register_pc_class(JSContext* ctx) {
     JS_SetPropertyStr(ctx, proto, "createDataChannel", JS_NewCFunction(ctx, pc_create_data_channel, "createDataChannel", 2));
     JS_SetPropertyStr(ctx, proto, "addTrack", JS_NewCFunction(ctx, pc_add_track, "addTrack", 1));
     JS_SetPropertyStr(ctx, proto, "setRemoteDescription", JS_NewCFunction(ctx, pc_set_remote_description, "setRemoteDescription", 1));
+    JS_SetPropertyStr(ctx, proto, "setLocalDescription", JS_NewCFunction(ctx, pc_set_local_description, "setLocalDescription", 1));
     JS_SetPropertyStr(ctx, proto, "addIceCandidate", JS_NewCFunction(ctx, pc_add_ice_candidate, "addIceCandidate", 1));
     JS_SetPropertyStr(ctx, proto, "localDescription", JS_NewCFunction(ctx, pc_local_description, "localDescription", 0));
     JS_SetPropertyStr(ctx, proto, "state", JS_NewCFunction(ctx, pc_state, "state", 0));
@@ -964,6 +1018,11 @@ JSValue webrtc_peerconnection_create_fn(JSContext* ctx, JSValueConst, int argc, 
     if (option_string(ctx, options, "iceTransportPolicy", policy) && policy == "relay") {
         config.iceTransportPolicy = rtc::TransportPolicy::Relay;
     }
+    // When true, libdatachannel does not auto-generate offers/answers; the caller
+    // drives negotiation explicitly with setLocalDescription(). This makes manual
+    // answerer flows (setRemoteDescription -> addTrack(mid) -> setLocalDescription)
+    // deterministic instead of racing the auto-answer.
+    config.disableAutoNegotiation = option_bool(ctx, options, "disableAutoNegotiation", false);
 
     auto state = std::make_shared<SessionState>();
     std::shared_ptr<rtc::PeerConnection> pc;

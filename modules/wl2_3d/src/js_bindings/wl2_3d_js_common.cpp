@@ -176,14 +176,14 @@ JSValue metadata(JSContext* ctx, SceneState& scene) {
     JS_SetPropertyStr(ctx, obj, "gpuActive", JS_NewBool(ctx, scene.gpuActive));
     if (scene.frameRing.isOpen()) {
         JS_SetPropertyStr(ctx, obj, "sequence", JS_NewInt64(ctx, scene.frameRing.sequence()));
-        auto frame = scene.frameRing.frame(0);
+        auto frame = scene.frameRing.frame(scene.frameRing.pointer(-1));
         JS_SetPropertyStr(ctx, obj, "stride", JS_NewInt64(ctx, frame ? frame.value().scanWidth : 0));
     }
     return obj;
 }
 
 wl2::Result<void> write_scene_frame(SceneState& scene) {
-    auto frame = scene.frameRing.frame(0);
+    auto frame = scene.frameRing.frame(scene.frameRing.pointer(0));
     if (!frame) {
         return frame.error();
     }
@@ -194,7 +194,7 @@ wl2::Result<void> write_scene_frame(SceneState& scene) {
     // when graphics is authorized and a GL context exists; otherwise the CPU view
     // draws the same scene graph (camera, grid, shaded nodes, particles). Both are
     // views over the same engine model and honor the shared pixel contract, so the
-    // ring bookkeeping (frame(0)/size checks/next(1)) below is identical for each.
+    // ring bookkeeping (write pointer/size checks/next(1)) below is identical for each.
     auto* const data = reinterpret_cast<unsigned char*>(frame.value().data);
     const int width = static_cast<int>(scene.width);
     const int height = static_cast<int>(scene.height);

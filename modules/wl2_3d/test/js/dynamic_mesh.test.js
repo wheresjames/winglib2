@@ -129,7 +129,7 @@ if (!hasV12Surface) {
   console.log(`wl2:3d dynamic mesh renderer=${meta.renderer} gpuActive=${meta.gpuActive}`);
   const video = VideoBuffer.openExisting(name);
   try {
-    const frame1 = video.frame(0);
+    const frame1 = video.latestFrame();
     const bytes1 = frame1.data.uint8Array();
     assert(
       foregroundPixels(bytes1, 64, 48, frame1.scanWidth) > 0,
@@ -144,7 +144,7 @@ if (!hasV12Surface) {
       ]),
       color: "#80ed99",
     });
-    const frame2 = video.frame(0);
+    const frame2 = video.latestFrame();
     const after = frameChecksum(frame2.data.uint8Array(), 64, 48, frame2.scanWidth);
     assert(before !== after, "dynamic mesh update should change rendered pixels");
   } finally {

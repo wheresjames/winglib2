@@ -107,6 +107,11 @@ function textOf(buffer) {
     assert(frame.width === 8 && frame.height === 4, "VideoBuffer frame metadata mismatch");
     assert(frame.data.uint8Array()[0] === 0x33, "VideoBuffer frame payload mismatch");
     video.next(1);
+    if (hasV12Surface) {
+      const latest = video.latestFrame();
+      assert(latest.slot === 0 && latest.sequence >= 0, "VideoBuffer latestFrame metadata mismatch");
+      assert(latest.data.uint8Array()[0] === 0x33, "VideoBuffer latestFrame payload mismatch");
+    }
     assert(video.metadata().sequence >= meta.sequence, "VideoBuffer sequence did not advance");
   } finally {
     video.close();
@@ -123,6 +128,12 @@ function textOf(buffer) {
     const view = audio.buffer(0);
     assert(view.channels === 2 && view.bitsPerSample === 16, "AudioBuffer view metadata mismatch");
     assert(view.data.uint8Array()[0] === 0x22, "AudioBuffer payload mismatch");
+    audio.next(1);
+    if (hasV12Surface) {
+      const latest = audio.latestBuffer();
+      assert(latest.slot === 0 && latest.sequence >= 0, "AudioBuffer latestBuffer metadata mismatch");
+      assert(latest.data.uint8Array()[0] === 0x22, "AudioBuffer latestBuffer payload mismatch");
+    }
   } finally {
     audio.close();
   }

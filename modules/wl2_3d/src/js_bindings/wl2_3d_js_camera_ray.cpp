@@ -123,7 +123,7 @@ JSValue camera_video_source(JSContext* ctx, JSValueConst thisVal, int argc, JSVa
         reader.formatName() != "RGBA32") {
         return throw_error(ctx, make_error("3d_invalid_frame", "camera.videoSource() requires an RGBA32 FrameRing"));
     }
-    auto frame = reader.frame(0);
+    auto frame = reader.frame(reader.pointer(-1));
     if (!frame || !frame.value().data || frame.value().scanWidth < frame.value().width * 4 ||
         frame.value().size < static_cast<size_t>(frame.value().scanWidth * frame.value().height)) {
         return throw_error(ctx, make_error("3d_invalid_frame", "camera.videoSource() rejected invalid frame metadata"));
@@ -237,4 +237,3 @@ JSValue ray_hit_scene(JSContext* ctx, JSValueConst thisVal, int argc, JSValueCon
     JS_SetPropertyStr(ctx, obj, "point", vec3_to_js(ctx, world));
     return obj;
 }
-

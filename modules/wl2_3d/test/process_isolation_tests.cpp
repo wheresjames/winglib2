@@ -44,7 +44,7 @@ int renderer_process(const std::string& name) {
     wl2::VideoBuffer video = std::move(created.value());
     int64_t seq = 0;
     for (;;) {
-        auto frame = video.frame(0);
+        auto frame = video.frame(video.pointer(0));
         if (!frame) {
             std::cerr << "renderer failed to map frame: " << frame.error().message() << '\n';
             return 43;
@@ -144,7 +144,7 @@ int main() {
         return fail("renderer did not publish frames");
     }
 
-    auto before = reader.frame(0);
+    auto before = reader.frame(reader.pointer(-1));
     if (!before) {
         kill(child, SIGKILL);
         waitpid(child, nullptr, 0);
@@ -164,7 +164,7 @@ int main() {
         return fail("renderer process was not killed as expected");
     }
 
-    auto after = reader.frame(0);
+    auto after = reader.frame(reader.pointer(-1));
     if (!after) {
         return fail("UI reader lost its mapped frame after renderer crash");
     }

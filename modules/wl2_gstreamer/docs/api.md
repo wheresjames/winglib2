@@ -219,12 +219,16 @@ Source bridges:
 ```js
 pipeline.attachVideoSource({ videoBufferName: "/frames" });
 pipeline.pushVideoFrame({ slot: 0, pts: 0 });
+pipeline.pushVideoFrame({ latest: true });
 pipeline.attachAudioSource({ audioBufferName: "/pcm" });
 pipeline.pushAudioSamples({ slot: 0 });
+pipeline.pushAudioSamples({ latest: true });
 ```
 
 `pushVideoFrame()` and `pushAudioSamples()` generate fixed-rate timestamps by
-default. `pts` and `duration` override the generated values.
+default. `pts` and `duration` override the generated values. Use explicit `slot`
+for manually addressed buffers, or `latest: true` to push the latest committed
+slot from a live producer ring.
 
 Packet bridges:
 

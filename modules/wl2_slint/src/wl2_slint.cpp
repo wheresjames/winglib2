@@ -1017,7 +1017,7 @@ JSValue instance_set_image_from_frame_ring(JSContext* ctx, JSValueConst thisVal,
         return JS_Throw(ctx,
             make_error(ctx, SlintErr::Unsupported, "setImageFromFrameRing", "only RGBA32 FrameRing images are supported", "", property));
     }
-    auto frame = video.frame(0);
+    auto frame = video.frame(video.pointer(-1));
     if (!frame) {
         video.close();
         return JS_Throw(ctx,
@@ -1099,7 +1099,7 @@ JSValue offscreen_publish(JSContext* ctx, OffscreenTarget& target, const char* o
     target.adapter->software_renderer().render(
         std::span<slint::Rgb8Pixel>(target.scratch.data(), count), target.width);
 
-    auto frame = target.ring.frame(0);
+    auto frame = target.ring.frame(target.ring.pointer(0));
     if (!frame) {
         return JS_Throw(ctx, make_error(ctx, SlintErr::InvalidArgument, op, frame.error().message()));
     }

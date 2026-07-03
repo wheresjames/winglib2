@@ -132,7 +132,7 @@ if (!hasV12Surface) {
   reader = VideoBuffer.openExisting(name);
   const meta = reader.metadata();
   assert(meta.width === 48 && meta.height === 24, `reader sees resized dims, got ${meta.width}x${meta.height}`);
-  const frame = reader.frame(0);
+  const frame = reader.latestFrame();
   assert(frame.scanWidth >= 48 * 4, "resized frame stride is valid");
   reader.close();
 

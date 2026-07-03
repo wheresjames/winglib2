@@ -8,6 +8,17 @@ set_tests_properties(webrtc.wl2_webrtc PROPERTIES
     LABELS "webrtc;js;integration"
     TIMEOUT 60)
 
+add_test(NAME webrtc.helpers
+    COMMAND
+        $<TARGET_FILE:wl2>
+        run
+        --allow-shared-memory
+        --shared-memory-allow /wl2_webrtc
+        ${CMAKE_CURRENT_SOURCE_DIR}/js/helpers.test.js)
+set_tests_properties(webrtc.helpers PROPERTIES
+    LABELS "webrtc;js;integration;membus"
+    TIMEOUT 60)
+
 if(TARGET wl2_gstreamer_static)
     add_test(NAME webrtc.gstreamer_packetbuffer_interop
         COMMAND

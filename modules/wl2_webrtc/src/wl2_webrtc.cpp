@@ -1,5 +1,8 @@
 #include "webrtc/internal.h"
 
+#include <cstdio>
+#include <cstring>
+
 namespace wl2_webrtc {
 
 const char* const WebRtcApi = R"(Exports JavaScript module wl2:webrtc.
@@ -13,10 +16,15 @@ Functions:
   WebSocket.connect(options)      -> WebSocket
   SignalingServer.listen(options) -> SignalingServer
 
+High-level helpers (JavaScript, see docs/api.md):
+  new MediaSession(options)       -> one sender-offers peer (addTrack, start, handleSignal, pump)
+  new SignalingHub(options)       -> multiplex MediaSessions over a signaling socket with auth
+
   PeerConnection methods:
   createDataChannel(label)        -> DataChannel (triggers negotiation)
-  addTrack(options)               -> Track (RTP from PacketBuffer)
+  addTrack(options)               -> Track (RTP from PacketBuffer, autoOffer defaults true)
   setRemoteDescription({ type, sdp }) -> { ok }
+  setLocalDescription("offer"|"answer") -> { ok }
   addIceCandidate({ candidate, sdpMid? }) -> { ok }
   localDescription()              -> { type, sdp } | null
   state()                         -> { connection, ice, gathering, signaling }
@@ -142,6 +150,299 @@ JSValue webrtc_capabilities_fn(JSContext* ctx, JSValueConst, int, JSValueConst*)
     return obj;
 }
 
+// High-level JavaScript helpers layered on top of the native PeerConnection.
+// Authored in JS (it is signaling glue, not a hot path) and evaluated at module
+// init as a factory that closes over the native exports. Kept here rather than a
+// separate file because the module loader only resolves named modules -- a loose
+// ./helpers.js could not be imported. See docs/api.md for the public shape.
+const char* const kWebRtcHelpersJs = R"WLRTC(
+(function (native) {
+  "use strict";
+  var PeerConnection = native.PeerConnection;
+
+  function nowMs() {
+    try { return wl2.runtime.now(); } catch (e) { return Date.now(); }
+  }
+
+  // One peer connection streaming media to (or exchanging media with) a single
+  // remote. Sender-offers role: add tracks, then start() emits an SDP offer via
+  // the `signal` callback; feed the remote's answer/candidates back through
+  // handleSignal(). Media is pumped on demand -- drive pump() from the remote's
+  // periodic "pump" ticks (there is no server-side timer).
+  class MediaSession {
+    constructor(options) {
+      var opts = options || {};
+      this.signal = typeof opts.signal === "function" ? opts.signal : function () {};
+      this._onState = typeof opts.onState === "function" ? opts.onState : null;
+      this._onStatus = typeof opts.onStatus === "function" ? opts.onStatus : null;
+      this._onPump = [];
+      this._onClose = [];
+      this.tracks = [];
+      this.sentPackets = 0;
+      this.sentBytes = 0;
+      this.closed = false;
+      this.started = false;
+      this._lastStateAt = 0;
+      this.data = {}; // free-form slot for the app (e.g. a GStreamer pipeline)
+      // Drive negotiation explicitly (one offer per start()); disabling
+      // auto-negotiation keeps the signaling state deterministic.
+      var create = { loopbackOnly: opts.loopbackOnly === true, disableAutoNegotiation: true };
+      if (opts.receivePacketBufferNamePrefix) {
+        create.receivePacketBufferNamePrefix = opts.receivePacketBufferNamePrefix;
+      }
+      var ice = opts.iceServers || {};
+      if (ice.stunServer) create.stunServer = ice.stunServer;
+      if (Array.isArray(ice.turnServers)) create.turnServers = ice.turnServers;
+      if (ice.iceTransportPolicy) create.iceTransportPolicy = ice.iceTransportPolicy;
+      this.pc = PeerConnection.create(create);
+    }
+
+    onClose(cb) { if (typeof cb === "function") this._onClose.push(cb); return this; }
+    onState(cb) { if (typeof cb === "function") this._onState = cb; return this; }
+    onStatus(cb) { if (typeof cb === "function") this._onStatus = cb; return this; }
+    // Invoked at the start of every pump(); handy for polling a media pipeline's
+    // bus alongside the WebRTC event loop.
+    onPump(cb) { if (typeof cb === "function") this._onPump.push(cb); return this; }
+
+    _status(level, message) {
+      if (this._onStatus) { try { this._onStatus({ level: level, message: message }); } catch (e) {} }
+      this.signal({ type: "status", level: level, message: message });
+    }
+
+    // Emit a status message to the remote (and any onStatus listener).
+    notify(level, message) { this._status(level, message); return this; }
+
+    addTrack(spec) {
+      if (this.closed) throw new Error("MediaSession is closed");
+      var s = spec || {};
+      var track = this.pc.addTrack({
+        media: s.media || "video",
+        codec: s.codec || "VP8",
+        payloadType: s.payloadType || 96,
+        clockRate: s.clockRate || (s.media === "audio" ? 48000 : 90000),
+        track: s.track || 0,
+        sendPacketBufferName: s.sendPacketBufferName,
+        mid: s.mid,          // undefined -> native default ("video"/"audio")
+        autoOffer: false,    // exactly one explicit offer is emitted by start()
+      });
+      this.tracks.push(track);
+      return track;
+    }
+
+    // Emit a single offer covering every added track.
+    start() {
+      if (this.started || this.closed) return this;
+      if (this.tracks.length === 0) throw new Error("MediaSession.start() needs at least one track");
+      this.started = true;
+      this.pc.setLocalDescription("offer");
+      this.pump();
+      return this;
+    }
+
+    handleSignal(message) {
+      if (this.closed || !message) return;
+      var type = message.type;
+      if (type === "answer") {
+        if (message.description && message.description.sdp) this.pc.setRemoteDescription(message.description);
+      } else if (type === "candidate") {
+        if (message.candidate && message.candidate.candidate) this.pc.addIceCandidate(message.candidate);
+      } else if (type === "stop") {
+        this.close();
+        return;
+      }
+      this.pump();
+    }
+
+    pump() {
+      if (this.closed) return;
+      for (var hook of this._onPump) { try { hook(this); } catch (e) {} }
+      if (this.closed) return;
+      for (var ev of this.pc.poll({ timeoutMs: 0, max: 64 })) {
+        if (ev.type === "local-description") {
+          if (ev.description && ev.description.type === "offer") {
+            this.signal({ type: "offer", description: ev.description });
+          }
+        } else if (ev.type === "local-candidate") {
+          if (ev.candidate && ev.candidate.candidate) this.signal({ type: "candidate", candidate: ev.candidate });
+        } else if (ev.type === "state-change") {
+          if (this._onState) { try { this._onState(ev); } catch (e) {} }
+          this._sendState();
+        } else if (ev.type === "error") {
+          this._status("error", ev.message || "WebRTC error");
+        }
+      }
+      var anyOpen = false;
+      for (var t of this.tracks) {
+        if (t.isOpen()) {
+          anyOpen = true;
+          var p = t.pump({ timeoutMs: 0, max: 128 });
+          if (p && p.sent) { this.sentPackets += p.sent; this.sentBytes += p.bytes; }
+        }
+      }
+      var when = nowMs();
+      if (anyOpen && when - this._lastStateAt > 1000) { this._lastStateAt = when; this._sendState(); }
+    }
+
+    _sendState() {
+      var state, stats;
+      try { state = this.pc.state(); } catch (e) { return; }
+      try { stats = this.pc.stats(); } catch (e) { stats = {}; }
+      this.signal({
+        type: "state",
+        connection: state.connection, ice: state.ice,
+        gathering: state.gathering, signaling: state.signaling,
+        sentPackets: this.sentPackets, sentBytes: this.sentBytes,
+        trackOpen: this.tracks.some(function (tr) { return tr.isOpen(); }),
+        selectedCandidatePair: stats.selectedCandidatePair || null,
+      });
+    }
+
+    stats() {
+      var s = {};
+      try { s = this.pc.stats(); } catch (e) {}
+      return {
+        sentPackets: this.sentPackets, sentBytes: this.sentBytes,
+        trackOpen: this.tracks.some(function (tr) { return tr.isOpen(); }),
+        selectedCandidatePair: s.selectedCandidatePair || null,
+      };
+    }
+
+    close() {
+      if (this.closed) return;
+      this.closed = true;
+      for (var t of this.tracks) { try { t.close(); } catch (e) {} }
+      try { this.pc.close(); } catch (e) {}
+      var cbs = this._onClose; this._onClose = [];
+      for (var cb of cbs) { try { cb(this); } catch (e) {} }
+    }
+  }
+
+  // Multiplexes many MediaSessions over one signaling transport (e.g. a wl2:http
+  // WebSocket). Wire onMessage/onClose into the server's ws handlers. The client
+  // sends {type:"hello", token} first; on success the hub replies {type:"welcome",
+  // iceServers}. On {type:"start"} it builds a MediaSession and invokes onSession
+  // so the app can attach tracks (and its pipeline) before the offer is sent.
+  class SignalingHub {
+    constructor(options) {
+      var opts = options || {};
+      this._authenticate = typeof opts.authenticate === "function" ? opts.authenticate : null;
+      this._onSession = typeof opts.onSession === "function" ? opts.onSession : function () {};
+      this._onError = typeof opts.onError === "function" ? opts.onError : null;
+      this._iceServers = opts.iceServers || {};                 // native side (stunServer/turnServers)
+      this._clientIceServers = opts.clientIceServers || [];     // browser RTCIceServer[]
+      this._loopbackOnly = opts.loopbackOnly === true;
+      this._receivePrefix = opts.receivePacketBufferNamePrefix;
+      this._clients = new Map(); // conn.id -> { conn, authed, userId, session }
+    }
+
+    _record(conn) {
+      var rec = this._clients.get(conn.id);
+      if (!rec) { rec = { id: conn.id, conn: conn, authed: false, userId: null, session: null }; this._clients.set(conn.id, rec); }
+      else rec.conn = conn; // refresh the per-callback conn object for later sends
+      return rec;
+    }
+
+    _send(id, msg) {
+      var rec = this._clients.get(id);
+      if (!rec || !rec.conn) return;
+      try { rec.conn.send(JSON.stringify(msg)); } catch (e) {}
+    }
+
+    onMessage(conn, text) {
+      var rec = this._record(conn);
+      var message;
+      try { message = JSON.parse(text); } catch (e) { return; }
+      var type = message && message.type;
+      if (type === "hello") { this._authenticateClient(rec, message); return; }
+      if (!rec.authed) { this._send(rec.id, { type: "error", message: "Send hello before signaling." }); return; }
+      if (type === "start") { this._startClient(rec, message); }
+      else if (rec.session) { try { rec.session.handleSignal(message); } catch (e) { this._send(rec.id, { type: "status", level: "error", message: (e && e.message) || String(e) }); } }
+    }
+
+    _authenticateClient(rec, message) {
+      var userId = true;
+      if (this._authenticate) {
+        try { userId = this._authenticate(message, rec); } catch (e) { userId = false; }
+      }
+      if (userId) {
+        rec.authed = true;
+        rec.userId = userId === true ? null : userId;
+        this._send(rec.id, { type: "welcome", userId: rec.userId, iceServers: this._clientIceServers });
+      } else {
+        rec.authed = false;
+        this._send(rec.id, { type: "error", message: "Authentication failed." });
+        try { rec.conn.close(); } catch (e) {}
+      }
+    }
+
+    _startClient(rec, message) {
+      if (rec.session) { try { rec.session.close(); } catch (e) {} rec.session = null; }
+      var session = new MediaSession({
+        iceServers: this._iceServers,
+        loopbackOnly: this._loopbackOnly,
+        receivePacketBufferNamePrefix: this._receivePrefix,
+        signal: (function (hub, id) { return function (m) { hub._send(id, m); }; })(this, rec.id),
+      });
+      rec.session = session;
+      try {
+        this._onSession(session, { conn: rec.conn, userId: rec.userId, request: (message && message.request) || {} });
+        session.start();
+      } catch (e) {
+        this._send(rec.id, { type: "status", level: "error", message: (e && e.message) || String(e) });
+        try { session.close(); } catch (e2) {}
+        rec.session = null;
+        if (this._onError) { try { this._onError(e, rec); } catch (e2) {} }
+      }
+    }
+
+    onClose(conn) {
+      var rec = this._clients.get(conn.id);
+      if (!rec) return;
+      this._clients.delete(conn.id);
+      if (rec.session) { try { rec.session.close(); } catch (e) {} }
+    }
+
+    close() {
+      for (var rec of this._clients.values()) { if (rec.session) { try { rec.session.close(); } catch (e) {} } }
+      this._clients.clear();
+    }
+  }
+
+  return { MediaSession: MediaSession, SignalingHub: SignalingHub };
+})
+)WLRTC";
+
+// Evaluate the JS helper factory and install its classes as module exports.
+void install_webrtc_helpers(JSContext* ctx, JSModuleDef* module, JSValueConst nativeExports) {
+    JSValue factory = JS_Eval(ctx, kWebRtcHelpersJs, std::strlen(kWebRtcHelpersJs),
+        "wl2:webrtc/helpers.js", JS_EVAL_TYPE_GLOBAL);
+    JSValue mediaSession = JS_UNDEFINED;
+    JSValue signalingHub = JS_UNDEFINED;
+    if (!JS_IsException(factory)) {
+        JSValue helpers = JS_Call(ctx, factory, JS_UNDEFINED, 1, const_cast<JSValueConst*>(&nativeExports));
+        if (!JS_IsException(helpers)) {
+            mediaSession = JS_GetPropertyStr(ctx, helpers, "MediaSession");
+            signalingHub = JS_GetPropertyStr(ctx, helpers, "SignalingHub");
+        } else {
+            JSValue exc = JS_GetException(ctx);
+            const char* text = JS_ToCString(ctx, exc);
+            fprintf(stderr, "wl2:webrtc helper init failed: %s\n", text ? text : "unknown");
+            if (text) JS_FreeCString(ctx, text);
+            JS_FreeValue(ctx, exc);
+        }
+        JS_FreeValue(ctx, helpers);
+    } else {
+        JSValue exc = JS_GetException(ctx);
+        const char* text = JS_ToCString(ctx, exc);
+        fprintf(stderr, "wl2:webrtc helper compile failed: %s\n", text ? text : "unknown");
+        if (text) JS_FreeCString(ctx, text);
+        JS_FreeValue(ctx, exc);
+    }
+    JS_FreeValue(ctx, factory);
+    JS_SetModuleExport(ctx, module, "MediaSession", mediaSession);
+    JS_SetModuleExport(ctx, module, "SignalingHub", signalingHub);
+}
+
 int init_webrtc_module(JSContext* ctx, JSModuleDef* module) {
     register_webrtc_classes(ctx);
     JS_SetModuleExport(ctx, module, "version", JS_NewCFunction(ctx, webrtc_version_fn, "version", 0));
@@ -149,19 +450,31 @@ int init_webrtc_module(JSContext* ctx, JSModuleDef* module) {
     JSValue peerConnection = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, peerConnection, "create",
         JS_NewCFunction(ctx, webrtc_peerconnection_create_fn, "create", 1));
-    JS_SetModuleExport(ctx, module, "PeerConnection", peerConnection);
     JSValue webSocket = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, webSocket, "connect",
         JS_NewCFunction(ctx, webrtc_websocket_connect_fn, "connect", 1));
-    JS_SetModuleExport(ctx, module, "WebSocket", webSocket);
     JSValue signalingServer = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, signalingServer, "listen",
         JS_NewCFunction(ctx, webrtc_signaling_server_listen_fn, "listen", 1));
+
+    // Build the object handed to the JS helper factory before the values are
+    // consumed by JS_SetModuleExport.
+    JSValue nativeExports = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, nativeExports, "PeerConnection", JS_DupValue(ctx, peerConnection));
+    JS_SetPropertyStr(ctx, nativeExports, "WebSocket", JS_DupValue(ctx, webSocket));
+    JS_SetPropertyStr(ctx, nativeExports, "SignalingServer", JS_DupValue(ctx, signalingServer));
+
+    JS_SetModuleExport(ctx, module, "PeerConnection", peerConnection);
+    JS_SetModuleExport(ctx, module, "WebSocket", webSocket);
     JS_SetModuleExport(ctx, module, "SignalingServer", signalingServer);
+
+    install_webrtc_helpers(ctx, module, nativeExports);
+    JS_FreeValue(ctx, nativeExports);
     return 0;
 }
 
-constexpr const char* kExportNames[] = {"version", "capabilities", "PeerConnection", "WebSocket", "SignalingServer"};
+constexpr const char* kExportNames[] = {"version", "capabilities", "PeerConnection", "WebSocket",
+    "SignalingServer", "MediaSession", "SignalingHub"};
 
 #endif // WL2_HAVE_QUICKJS
 

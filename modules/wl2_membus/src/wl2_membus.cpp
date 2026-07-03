@@ -164,6 +164,21 @@ bool js_bool_prop(JSContext* ctx, JSValueConst obj, const char* name, bool fallb
     return out;
 }
 
+int64_t js_int_prop(JSContext* ctx, JSValueConst obj, const char* name, int64_t fallback) {
+    if (!JS_IsObject(obj)) {
+        return fallback;
+    }
+    JSValue value = JS_GetPropertyStr(ctx, obj, name);
+    if (JS_IsUndefined(value) || JS_IsNull(value)) {
+        JS_FreeValue(ctx, value);
+        return fallback;
+    }
+    int64_t out = fallback;
+    JS_ToInt64(ctx, &out, value);
+    JS_FreeValue(ctx, value);
+    return out;
+}
+
 // Drop any exception left pending by a probing native call such as
 // JS_GetArrayBuffer or JS_GetTypedArrayBuffer when the value is not of the
 // expected type. payload_string deliberately tries several representations, so
@@ -802,6 +817,51 @@ JSValue vb_frame(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* a
     return obj;
 }
 
+JSValue vb_latest_frame(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv) {
+    auto* native = get_native<wl2::VideoBuffer>(ctx, thisVal, video_buffer_class_id);
+    if (!native) {
+        return JS_EXCEPTION;
+    }
+    const int64_t lastSequence = argc > 0 ? js_int_prop(ctx, argv[0], "lastSequence", -1) : -1;
+    const long timeout = argc > 0 ? timeout_ms(ctx, argv[0], 0) : 0;
+    if (timeout > 0) {
+        native->waitForFrame(std::chrono::milliseconds{timeout}, lastSequence);
+    }
+    const int64_t retries = std::max<int64_t>(1, argc > 0 ? js_int_prop(ctx, argv[0], "retries", 3) : 3);
+    for (int64_t attempt = 0; attempt < retries; ++attempt) {
+        const int64_t slot = native->pointer(-1);
+        if (slot < 0) {
+            return throw_error(ctx, wl2::Error("libmembus_view_failed", "No committed video frame is available"));
+        }
+        const int64_t beforeSeq = native->frameSequence(slot);
+        if (beforeSeq < 0) {
+            return throw_error(ctx, wl2::Error("libmembus_view_failed", "No committed video frame is available"));
+        }
+        auto result = native->frame(slot);
+        if (!result) {
+            return throw_error(ctx, result.error());
+        }
+        const auto& frame = result.value();
+        if (!frame.data) {
+            return throw_error(ctx, wl2::Error("libmembus_view_failed", "Latest video frame has no mapped data"));
+        }
+        std::string copy(frame.data, frame.size);
+        const int64_t afterSeq = native->frameSequence(slot);
+        if (beforeSeq == afterSeq) {
+            JSValue obj = JS_NewObject(ctx);
+            JS_SetPropertyStr(ctx, obj, "slot", JS_NewInt64(ctx, slot));
+            JS_SetPropertyStr(ctx, obj, "sequence", JS_NewInt64(ctx, afterSeq));
+            JS_SetPropertyStr(ctx, obj, "width", JS_NewInt64(ctx, frame.width));
+            JS_SetPropertyStr(ctx, obj, "height", JS_NewInt64(ctx, frame.height));
+            JS_SetPropertyStr(ctx, obj, "scanWidth", JS_NewInt64(ctx, frame.scanWidth));
+            JS_SetPropertyStr(ctx, obj, "size", JS_NewInt64(ctx, static_cast<int64_t>(copy.size())));
+            JS_SetPropertyStr(ctx, obj, "data", make_buffer(ctx, std::string_view(copy.data(), copy.size())));
+            return obj;
+        }
+    }
+    return throw_error(ctx, wl2::Error("libmembus_overwritten", "Latest video frame changed while it was being copied"));
+}
+
 JSValue vb_meta(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv) {
     (void)argc;
     (void)argv;
@@ -921,6 +981,50 @@ JSValue ab_buffer(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* 
     JS_SetPropertyStr(ctx, obj, "size", JS_NewInt64(ctx, static_cast<int64_t>(buffer.size)));
     JS_SetPropertyStr(ctx, obj, "data", make_buffer(ctx, std::string_view(buffer.data, buffer.size)));
     return obj;
+}
+
+JSValue ab_latest_buffer(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv) {
+    auto* native = get_native<wl2::AudioBuffer>(ctx, thisVal, audio_buffer_class_id);
+    if (!native) {
+        return JS_EXCEPTION;
+    }
+    const int64_t lastSequence = argc > 0 ? js_int_prop(ctx, argv[0], "lastSequence", -1) : -1;
+    const long timeout = argc > 0 ? timeout_ms(ctx, argv[0], 0) : 0;
+    if (timeout > 0) {
+        native->waitForFrame(std::chrono::milliseconds{timeout}, lastSequence);
+    }
+    const int64_t retries = std::max<int64_t>(1, argc > 0 ? js_int_prop(ctx, argv[0], "retries", 3) : 3);
+    for (int64_t attempt = 0; attempt < retries; ++attempt) {
+        const int64_t slot = native->pointer(-1);
+        if (slot < 0) {
+            return throw_error(ctx, wl2::Error("libmembus_view_failed", "No committed audio buffer is available"));
+        }
+        const int64_t beforeSeq = native->frameSequence(slot);
+        if (beforeSeq < 0) {
+            return throw_error(ctx, wl2::Error("libmembus_view_failed", "No committed audio buffer is available"));
+        }
+        auto result = native->buffer(slot);
+        if (!result) {
+            return throw_error(ctx, result.error());
+        }
+        const auto& buffer = result.value();
+        if (!buffer.data) {
+            return throw_error(ctx, wl2::Error("libmembus_view_failed", "Latest audio buffer has no mapped data"));
+        }
+        std::string copy(buffer.data, buffer.size);
+        const int64_t afterSeq = native->frameSequence(slot);
+        if (beforeSeq == afterSeq) {
+            JSValue obj = JS_NewObject(ctx);
+            JS_SetPropertyStr(ctx, obj, "slot", JS_NewInt64(ctx, slot));
+            JS_SetPropertyStr(ctx, obj, "sequence", JS_NewInt64(ctx, afterSeq));
+            JS_SetPropertyStr(ctx, obj, "channels", JS_NewInt64(ctx, buffer.channels));
+            JS_SetPropertyStr(ctx, obj, "bitsPerSample", JS_NewInt64(ctx, buffer.bitsPerSample));
+            JS_SetPropertyStr(ctx, obj, "size", JS_NewInt64(ctx, static_cast<int64_t>(copy.size())));
+            JS_SetPropertyStr(ctx, obj, "data", make_buffer(ctx, std::string_view(copy.data(), copy.size())));
+            return obj;
+        }
+    }
+    return throw_error(ctx, wl2::Error("libmembus_overwritten", "Latest audio buffer changed while it was being copied"));
 }
 
 JSValue ab_meta(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv) {
@@ -1289,6 +1393,7 @@ int init_membus_module(JSContext* ctx, JSModuleDef* module) {
     add_class(ctx, &video_buffer_class_id, "VideoBuffer", video_buffer_finalizer, videoBuffer);
     set_method(ctx, video_buffer_class_id, "fill", vb_fill, 2);
     set_method(ctx, video_buffer_class_id, "frame", vb_frame, 1);
+    set_method(ctx, video_buffer_class_id, "latestFrame", vb_latest_frame, 1);
     set_method(ctx, video_buffer_class_id, "metadata", vb_meta, 0);
     set_method(ctx, video_buffer_class_id, "next", vb_next, 1);
     set_method(ctx, video_buffer_class_id, "close", vb_close, 0);
@@ -1299,6 +1404,7 @@ int init_membus_module(JSContext* ctx, JSModuleDef* module) {
     add_class(ctx, &audio_buffer_class_id, "AudioBuffer", audio_buffer_finalizer, audioBuffer);
     set_method(ctx, audio_buffer_class_id, "fill", ab_fill, 2);
     set_method(ctx, audio_buffer_class_id, "buffer", ab_buffer, 1);
+    set_method(ctx, audio_buffer_class_id, "latestBuffer", ab_latest_buffer, 1);
     set_method(ctx, audio_buffer_class_id, "metadata", ab_meta, 0);
     set_method(ctx, audio_buffer_class_id, "next", ab_next, 1);
     set_method(ctx, audio_buffer_class_id, "close", ab_close, 0);

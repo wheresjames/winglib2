@@ -26,7 +26,7 @@ if (!hasV12Surface) {
     assert(meta.bytesPerPixel === 4, "video should be RGBA");
     assert(meta.formatName === "RGBA32", `unexpected format: ${meta.formatName}`);
     assert(meta.sequence >= published.sequence, "video sequence mismatch");
-    const frame = video.frame(0);
+    const frame = video.latestFrame();
     assert(frame.scanWidth >= 8 * 4, "frame stride too small");
     const bytes = frame.data.uint8Array();
     assert(bytes[3] === 255, "first pixel should be opaque");

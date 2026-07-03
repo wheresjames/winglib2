@@ -5,8 +5,17 @@
 client/server for signaling.
 
 ```js
-import { version, capabilities, PeerConnection, WebSocket, SignalingServer } from "wl2:webrtc";
+import {
+  version, capabilities,
+  PeerConnection, WebSocket, SignalingServer,
+  MediaSession, SignalingHub,
+} from "wl2:webrtc";
 ```
+
+`PeerConnection`, `WebSocket`, and `SignalingServer` are the low-level
+primitives. `MediaSession` and `SignalingHub` are higher-level JavaScript
+helpers (see below) that remove the offer/answer/ICE boilerplate for the common
+"stream media to a browser" case.
 
 ## Module Functions
 
@@ -24,18 +33,32 @@ const pc = PeerConnection.create({
   stunServer: "stun:host:3478",
   turnServers: ["turn:user:pass@host:3478"],
   iceTransportPolicy: "all",
-  loopbackOnly: false
+  loopbackOnly: false,
+  disableAutoNegotiation: false
 });
 ```
 
 `loopbackOnly:true` binds host candidates to `127.0.0.1` and does not configure
 STUN/TURN. It is intended for deterministic tests and local deployments.
 
+`disableAutoNegotiation:true` stops libdatachannel from auto-generating
+offers/answers. The caller then drives negotiation explicitly with
+`setLocalDescription()`. This is required for a deterministic manual answerer
+(`setRemoteDescription` -> `addTrack({ mid })` -> `setLocalDescription("answer")`)
+and for emitting exactly one offer after adding several tracks.
+
 Methods:
 
 - `createDataChannel(label) -> DataChannel`
-- `addTrack(options) -> Track`
+- `addTrack({ media, codec, payloadType, clockRate?, track?, sendPacketBufferName, mid?, autoOffer? }) -> Track`
+  - `autoOffer` (default `true`): when the connection is `stable`, immediately
+    generate an offer. Set `false` to add several tracks and offer once, or to
+    answer a remote offer.
+  - `mid`: bind the send track to a specific m-line id (default `"video"` /
+    `"audio"`). Use the remote offer's mid so an answerer can send on the
+    negotiated line.
 - `setRemoteDescription({ type, sdp }) -> { ok: true }`
+- `setLocalDescription("offer" | "answer") -> { ok: true }`
 - `addIceCandidate({ candidate, sdpMid }) -> { ok: true }`
 - `localDescription() -> { type, sdp } | null`
 - `state() -> { connection, ice, gathering, signaling }`
@@ -172,6 +195,85 @@ These objects are intentionally transport-level. Applications can relay
 `local-description` and `local-candidate` peer events through the server as JSON
 and apply them with `setRemoteDescription()` / `addIceCandidate()` on the other
 side.
+
+## MediaSession
+
+A higher-level wrapper around a single `PeerConnection` for the common
+sender-offers case: add tracks, then `start()` emits one SDP offer through a
+`signal` callback; feed the remote's answer and candidates back through
+`handleSignal()`. Media is pumped on demand (there is no server-side timer), so
+drive `pump()` from the remote's periodic `pump` ticks.
+
+```js
+const session = new MediaSession({
+  loopbackOnly: true,                 // or iceServers: { stunServer, turnServers, iceTransportPolicy }
+  receivePacketBufferNamePrefix: "/my_recv",
+  signal: (msg) => conn.send(JSON.stringify(msg)),   // outbound to the remote
+});
+session.addTrack({ media: "video", codec: "VP8", payloadType: 96, sendPacketBufferName });
+session.onClose(() => pipeline.close());
+session.start();                      // emits { type: "offer", description }
+// on inbound messages from the remote:
+session.handleSignal(msg);            // "answer" | "candidate" | "pump" | "stop"
+```
+
+Methods:
+
+- `addTrack({ media, codec, payloadType, clockRate?, sendPacketBufferName, mid? }) -> Track`
+- `start() -> this` — emit exactly one offer covering all added tracks
+- `handleSignal(message)` — apply `answer` / `candidate`, or `pump` / `stop`
+- `pump()` — drain peer events, forward local description/candidates, send RTP
+- `onState(cb)` / `onStatus(cb)` / `onPump(cb)` / `onClose(cb) -> this`
+- `notify(level, message)` — send a `{ type: "status" }` to the remote
+- `stats() -> { sentPackets, sentBytes, trackOpen, selectedCandidatePair }`
+- `close()`
+- `data` — a free-form object for the application to stash state (e.g. a pipeline)
+
+`signal()` receives `{ type: "offer" | "candidate" | "state" | "status", ... }`
+objects to forward to the remote. The connection is created with
+`disableAutoNegotiation` so exactly one offer is produced.
+
+## SignalingHub
+
+Multiplexes many `MediaSession`s over one signaling transport (for example a
+`wl2:http` WebSocket). Wire its `onMessage`/`onClose` into the server's socket
+handlers. Clients send `{ type: "hello", token }` first; on success the hub
+replies `{ type: "welcome", iceServers }`. On `{ type: "start", request }` it
+builds a `MediaSession` and calls `onSession` so the app can attach tracks (and
+a pipeline) before the offer is sent.
+
+```js
+const hub = new SignalingHub({
+  loopbackOnly: true,
+  receivePacketBufferNamePrefix: "/my_recv",
+  clientIceServers: [],                          // RTCIceServer[] sent to the browser
+  authenticate: (hello) => verifyTicket(hello.token) ? "userId" : false,
+  onSession: (session, ctx) => {                 // ctx = { conn, userId, request }
+    const pipeline = buildPipeline(ctx.request);
+    session.data.pipeline = pipeline;
+    session.addTrack({ media: "video", codec: "VP8", payloadType: 96, sendPacketBufferName });
+    session.onClose(() => pipeline.close());
+  },
+});
+
+server.ws("/signal", {
+  onMessage: (conn, msg) => hub.onMessage(conn, msg.text()),
+  onClose: (conn) => hub.onClose(conn),
+});
+```
+
+Options: `authenticate(hello, record) -> userId | false` (omit to allow all),
+`onSession(session, ctx)`, `onError(error, record)`, `iceServers` (native
+`{ stunServer, turnServers, iceTransportPolicy }`), `clientIceServers`
+(browser `RTCIceServer[]`), `loopbackOnly`, `receivePacketBufferNamePrefix`.
+
+Methods: `onMessage(conn, text)`, `onClose(conn)`, `close()`. `conn` must expose
+`.id` and `.send(string)` (the `wl2:http` WebSocket connection does). A failed
+`authenticate` sends `{ type: "error" }` and closes the connection.
+
+The browser counterpart is the reusable `wl2-webrtc-client.js` library shipped
+with `examples/js/scripts/lib/` and demonstrated by
+`examples/js/scripts/http_webrtc_video_streamer.js`.
 
 ## Errors
 

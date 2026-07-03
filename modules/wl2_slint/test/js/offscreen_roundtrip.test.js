@@ -13,7 +13,7 @@ function assert(condition, message) {
 function centerPixel(name, x, y) {
   const video = VideoBuffer.openExisting(name);
   try {
-    const frame = video.frame(0);
+    const frame = video.latestFrame();
     const bytes = frame.data.uint8Array();
     const idx = y * frame.scanWidth + x * 4;
     return { r: bytes[idx], g: bytes[idx + 1], b: bytes[idx + 2], a: bytes[idx + 3] };

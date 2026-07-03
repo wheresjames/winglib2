@@ -66,11 +66,24 @@ assert(deniedListen === "webrtc_permission_denied",
 function waitForSocketOpen(ws) {
   for (let i = 0; i < 200; ++i) {
     for (const ev of ws.poll({ timeoutMs: 20, max: 32 })) {
-      if (ev.type === "open") return true;
-      if (ev.type === "error") throw new Error("websocket error: " + ev.detail);
+      if (ev.type === "open") return { open: true };
+      if (ev.type === "error") return { open: false, error: ev.detail || "" };
     }
   }
-  return false;
+  return { open: false, error: "timed out waiting for open" };
+}
+
+function connectWebSocket(url, label) {
+  let lastError = "";
+  for (let attempt = 0; attempt < 20; ++attempt) {
+    const ws = WebSocket.connect({ url });
+    const opened = waitForSocketOpen(ws);
+    if (opened.open) return ws;
+    lastError = opened.error;
+    ws.close();
+    if (!String(lastError).includes("TCP connection failed")) break;
+  }
+  throw new Error(label + " websocket error: " + lastError);
 }
 
 function waitForServerClient(server) {
@@ -87,8 +100,7 @@ function waitForServerClient(server) {
 const server = SignalingServer.listen({ host: "127.0.0.1", port: 0, path: "/ws" });
 const serverPort = server.port();
 assert(serverPort > 0, "server did not report a bound port");
-const ws = WebSocket.connect({ url: "ws://127.0.0.1:" + serverPort + "/ws" });
-assert(waitForSocketOpen(ws), "websocket client did not open");
+const ws = connectWebSocket("ws://127.0.0.1:" + serverPort + "/ws", "client");
 const serverClient = waitForServerClient(server);
 assert(serverClient > 0, "server did not report connected client");
 
@@ -127,10 +139,8 @@ server.close();
 // --- Two peers negotiate through the built-in WebSocket signaling broker ---
 const broker = SignalingServer.listen({ host: "127.0.0.1", port: 0, path: "/signal" });
 const brokerPort = broker.port();
-const sigA = WebSocket.connect({ url: "ws://127.0.0.1:" + brokerPort + "/signal" });
-const sigB = WebSocket.connect({ url: "ws://127.0.0.1:" + brokerPort + "/signal" });
-assert(waitForSocketOpen(sigA), "signaling client A did not open");
-assert(waitForSocketOpen(sigB), "signaling client B did not open");
+const sigA = connectWebSocket("ws://127.0.0.1:" + brokerPort + "/signal", "signaling client A");
+const sigB = connectWebSocket("ws://127.0.0.1:" + brokerPort + "/signal", "signaling client B");
 
 sigA.send(JSON.stringify({ from: "a", hello: true }));
 sigB.send(JSON.stringify({ from: "b", hello: true }));

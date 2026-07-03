@@ -16,6 +16,7 @@ int wl2_module_store_tests_entry();
 int wl2_module_deps_tests_entry();
 int wl2_module_resolver_tests_entry();
 int wl2_app_store_tests_entry();
+int wl2_trust_store_tests_entry();
 int run_membus_tests();
 int run_membus_test_case(std::string_view name);
 int run_script_thread_tests();
@@ -74,6 +75,9 @@ int main(int argc, char** argv) {
     }
     if (suite == "app_store") {
         return wl2_app_store_tests_entry();
+    }
+    if (suite == "trust_store") {
+        return wl2_trust_store_tests_entry();
     }
     if (suite == "script_thread") {
         if (argc > 2) {

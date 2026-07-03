@@ -76,6 +76,15 @@ if(WL2_BUILD_TESTING)
             -P ${CMAKE_CURRENT_SOURCE_DIR}/test/scripts/expect_wl2_failure.cmake)
     set_tests_properties(scripts.wl2_cli_invalid_app_action PROPERTIES
         LABELS "js;cli")
+    add_test(NAME scripts.wl2_trust_cli
+        COMMAND
+            ${CMAKE_COMMAND}
+            -DWL2_EXECUTABLE=$<TARGET_FILE:wl2>
+            -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/trust_cli
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/test/scripts/expect_trust_cli.cmake)
+    set_tests_properties(scripts.wl2_trust_cli PROPERTIES
+        LABELS "js;cli;permissions;trust"
+        TIMEOUT 30)
     add_test(NAME scripts.wl2_shebang_smoke
         COMMAND
             $<TARGET_FILE:wl2>

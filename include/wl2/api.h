@@ -15,6 +15,8 @@
 #include "wl2/membus.h"
 #include "wl2/module.h"
 #include "wl2/module_resolver.h"
+#include "wl2/permissions.h"
 #include "wl2/resources.h"
 #include "wl2/runtime.h"
 #include "wl2/thread_tree.h"
+#include "wl2/trust_store.h"

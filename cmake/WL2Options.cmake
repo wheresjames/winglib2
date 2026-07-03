@@ -35,8 +35,15 @@ set(WL2_LIBMEMBUS_TARGET_VERSION "2.1.0" CACHE STRING "Target libmembus API vers
 set(WL2_LIBMEMBUS_PROVIDER "auto" CACHE STRING "libmembus provider: auto, local, package, fetch, or off")
 set_property(CACHE WL2_LIBMEMBUS_PROVIDER PROPERTY STRINGS auto local package fetch off)
 
+set(WL2_NLOHMANN_JSON_ROOT "" CACHE PATH "Path containing nlohmann/json.hpp or include/nlohmann/json.hpp")
+set(WL2_NLOHMANN_JSON_PROVIDER "auto" CACHE STRING "nlohmann_json provider: auto, local, package, fetch, or off")
+set_property(CACHE WL2_NLOHMANN_JSON_PROVIDER PROPERTY STRINGS auto local package fetch off)
+set(WL2_NLOHMANN_JSON_VERSION "3.11.3" CACHE STRING "nlohmann_json release version")
+set(WL2_NLOHMANN_JSON_URL "https://github.com/nlohmann/json/releases/download/v${WL2_NLOHMANN_JSON_VERSION}/json.tar.xz" CACHE STRING "nlohmann_json source archive URL")
+
 wl2_dependency_configure_provider(QUICKJS WL2_QUICKJS_PROVIDER)
 wl2_dependency_configure_provider(LIBMEMBUS WL2_LIBMEMBUS_PROVIDER)
+wl2_dependency_configure_provider(NLOHMANN_JSON WL2_NLOHMANN_JSON_PROVIDER)
 
 function(wl2_configure_dependency_options)
     if(NOT WL2_DEPS_ROOT)
@@ -44,4 +51,5 @@ function(wl2_configure_dependency_options)
     endif()
 
     set(WL2_LIBMEMBUS_ROOT "${WL2_DEPS_ROOT}/libmembus" CACHE PATH "Path to a target-local libmembus checkout")
+    set(WL2_NLOHMANN_JSON_ROOT "${WL2_DEPS_ROOT}/nlohmann_json" CACHE PATH "Path to a target-local nlohmann_json checkout")
 endfunction()

@@ -17,8 +17,10 @@ add_library(wl2_core
     src/core/module_loader.cpp
     src/core/module_resolver.cpp
     src/core/module_store.cpp
+    src/core/permissions.cpp
     src/core/resources.cpp
     src/core/runtime.cpp
+    src/core/trust_store.cpp
     src/core/thread_tree.cpp)
 
 target_include_directories(wl2_core
@@ -35,6 +37,10 @@ target_compile_definitions(wl2_core
     PRIVATE
         WL2_BUILD="${APPBUILD}")
 target_compile_features(wl2_core PUBLIC cxx_std_20)
+
+# Required JSON support for trust records and the wl2:json module.
+wl2_find_nlohmann_json()
+target_include_directories(wl2_core PRIVATE ${WL2_NLOHMANN_JSON_INCLUDE_DIR})
 
 # Optional libmembus integration (shared-memory bus); compiled out when absent.
 wl2_find_libmembus()

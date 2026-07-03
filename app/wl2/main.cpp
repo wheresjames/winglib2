@@ -5,7 +5,11 @@
 #include "wl2/module_deps.h"
 #include "wl2/module_resolver.h"
 #include "wl2/module_store.h"
+#include "wl2/permissions.h"
+#include "wl2/trust_store.h"
 #include "wl2/wl2.h"
+
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <set>
@@ -16,8 +20,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
+#include <functional>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <map>
 #include <optional>
@@ -84,6 +91,7 @@ struct RunCommand {
     bool hasDeclaredPermissions = false;
     bool declaredPermissionsApproved = false;
     wl2::PermissionSet declaredPermissions;
+    std::vector<std::string> declaredFilesystemReadRaw;
     std::vector<std::string> sharedMemoryAllowList;
     bool allowFilesystemReads = false;
     std::vector<std::filesystem::path> filesystemReadRoots;
@@ -129,6 +137,7 @@ void usage(std::ostream& out = std::cerr) {
         << "  wl2 deps <lock|fetch|build|install|status> [--manifest wl2.yml] [--prefix dir] [--generator name] [--build-type type]\n"
         << "  wl2 test [--manifest wl2.yml] [--filter text] [--json]\n"
         << "  wl2 init <name>\n"
+        << "  wl2 trust <list|show|revoke|clear> [<id>] [--json] [--yes]\n"
         << "  wl2 showapi <module>\n"
         << "  wl2 graphics\n"
         << "  wl2 version\n";
@@ -295,30 +304,6 @@ bool should_print_details(StackTraceMode mode, const wl2::Error& error) {
         return false;
     }
     return !error.details().empty();
-}
-
-std::string json_escape(std::string_view value) {
-    std::string out;
-    out.reserve(value.size() + 8);
-    for (char ch : value) {
-        switch (ch) {
-            case '\\': out += "\\\\"; break;
-            case '"': out += "\\\""; break;
-            case '\n': out += "\\n"; break;
-            case '\r': out += "\\r"; break;
-            case '\t': out += "\\t"; break;
-            default:
-                if (static_cast<unsigned char>(ch) < 0x20) {
-                    out += "\\u00";
-                    constexpr char hex[] = "0123456789abcdef";
-                    out.push_back(hex[(ch >> 4) & 0x0f]);
-                    out.push_back(hex[ch & 0x0f]);
-                } else {
-                    out.push_back(ch);
-                }
-        }
-    }
-    return out;
 }
 
 std::string js_string_escape(std::string_view value) {
@@ -535,6 +520,7 @@ bool append_declared_permission(RunCommand& command, const std::string& key, con
     }
     if (normalized == "filesystem_read") {
         command.declaredPermissions.filesystemRead.emplace_back(expanded);
+        command.declaredFilesystemReadRaw.push_back(value);
         return true;
     }
     std::cerr << "unknown wl2 declared permission: " << key << '\n';
@@ -698,6 +684,7 @@ bool load_declared_permissions(RunCommand& command) {
 
 struct ScriptTrustIdentity {
     std::filesystem::path path;
+    std::string displayPath;
     std::string checksum;
 };
 
@@ -718,7 +705,7 @@ std::optional<ScriptTrustIdentity> script_trust_identity(const RunCommand& comma
     if (!checksum) {
         return std::nullopt;
     }
-    return ScriptTrustIdentity{canonical, checksum.value()};
+    return ScriptTrustIdentity{canonical, display_script_path(command.script), checksum.value()};
 }
 
 std::optional<std::filesystem::path> wl2_config_home() {
@@ -736,82 +723,138 @@ std::optional<std::filesystem::path> declared_trust_store_path() {
     if (!home) {
         return std::nullopt;
     }
-    return *home / "script-permissions.v1";
+    return *home / "trust.json";
 }
 
-bool declared_trust_matches(const ScriptTrustIdentity& identity) {
+std::string iso_utc_now() {
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t time = std::chrono::system_clock::to_time_t(now);
+    std::tm tm{};
+#if defined(_WIN32)
+    gmtime_s(&tm, &time);
+#else
+    gmtime_r(&time, &tm);
+#endif
+    std::ostringstream out;
+    out << std::put_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
+    return out.str();
+}
+
+std::string trust_record_id(const ScriptTrustIdentity& identity) {
+    std::hash<std::string> hasher;
+    std::ostringstream out;
+    out << "tr_" << std::hex << hasher(identity.path.string() + "\n" + identity.checksum);
+    return out.str();
+}
+
+std::optional<wl2::TrustStore> load_declared_trust_store() {
     auto storePath = declared_trust_store_path();
     if (!storePath) {
-        return false;
+        return wl2::TrustStore{};
     }
-    std::ifstream in(*storePath);
-    if (!in) {
-        return false;
+    auto loaded = wl2::TrustStore::load(*storePath);
+    if (!loaded) {
+        std::cerr << "cannot load declared permission trust store: "
+                  << loaded.error().message() << '\n';
+        if (!loaded.error().details().empty()) {
+            std::cerr << loaded.error().details() << '\n';
+        }
+        return std::nullopt;
     }
-    const std::string pathText = identity.path.string();
-    std::string line;
-    while (std::getline(in, line)) {
-        line = trim_text(line);
-        if (line.empty() || line.front() == '#') {
-            continue;
-        }
-        const auto tab = line.find('\t');
-        if (tab == std::string::npos) {
-            continue;
-        }
-        if (line.substr(0, tab) == identity.checksum && line.substr(tab + 1) == pathText) {
-            return true;
-        }
-    }
-    return false;
+    return std::move(loaded).value();
 }
 
-bool remember_declared_trust(const ScriptTrustIdentity& identity) {
+bool save_declared_trust_store(const wl2::TrustStore& store) {
     auto storePath = declared_trust_store_path();
     if (!storePath) {
         std::cerr << "cannot persist declared permission approval: no config directory is available\n";
         return false;
     }
-    std::error_code ec;
-    std::filesystem::create_directories(storePath->parent_path(), ec);
-    if (ec) {
-        std::cerr << "cannot persist declared permission approval: " << ec.message() << '\n';
+    if (auto saved = store.save(*storePath); !saved) {
+        std::cerr << "cannot persist declared permission approval: "
+                  << saved.error().message() << '\n';
         return false;
     }
-    if (declared_trust_matches(identity)) {
-        return true;
-    }
-    std::ofstream out(*storePath, std::ios::app);
-    if (!out) {
-        std::cerr << "cannot persist declared permission approval: unable to write "
-                  << storePath->string() << '\n';
-        return false;
-    }
-    out << identity.checksum << '\t' << identity.path.string() << '\n';
     return true;
 }
 
-std::vector<std::string> declared_permission_lines(const RunCommand& command) {
+bool remember_declared_trust(
+    wl2::TrustStore& store,
+    const ScriptTrustIdentity& identity,
+    const RunCommand& command) {
+    const auto now = iso_utc_now();
+    wl2::TrustRecord record;
+    record.id = trust_record_id(identity);
+    record.path = identity.path;
+    record.displayPath = identity.displayPath;
+    record.sha256 = identity.checksum;
+    record.permissions = wl2::trustPermissionsFromPermissionSet(
+        command.declaredPermissions,
+        command.declaredFilesystemReadRaw);
+    record.grantedAt = now;
+    record.lastUsedAt = now;
+    record.source = command.trustDeclaredPermissions ? "cli" : "interactive";
+    store.addOrUpdate(std::move(record));
+    return save_declared_trust_store(store);
+}
+
+std::vector<std::string> declared_permission_lines(const wl2::PermissionSet& permissions) {
     std::vector<std::string> lines;
-    if (command.declaredPermissions.ui) {
+    if (permissions.ui) {
         lines.push_back("UI window access");
     }
-    if (command.declaredPermissions.graphics) {
+    if (permissions.graphics) {
         lines.push_back("graphics context access");
     }
-    for (const auto& item : command.declaredPermissions.network) {
+    for (const auto& item : permissions.network) {
         lines.push_back("network connections matching " + item);
     }
-    for (const auto& item : command.declaredPermissions.listen) {
+    for (const auto& item : permissions.listen) {
         lines.push_back("network listeners matching " + item);
     }
-    for (const auto& item : command.declaredPermissions.sharedMemory) {
+    for (const auto& item : permissions.sharedMemory) {
         lines.push_back("shared-memory names starting with " + item);
     }
-    for (const auto& item : command.declaredPermissions.filesystemRead) {
+    for (const auto& item : permissions.filesystemRead) {
         lines.push_back("filesystem reads under " + item.string());
     }
     return lines;
+}
+
+std::vector<std::string> declared_permission_lines(const RunCommand& command) {
+    return declared_permission_lines(command.declaredPermissions);
+}
+
+void print_trust_match_context(const RunCommand& command, const wl2::TrustMatch& match) {
+    if (!match.record) {
+        return;
+    }
+    switch (match.kind) {
+        case wl2::TrustMatchKind::SameHashDifferentPath:
+            std::cerr << display_script_path(command.script)
+                      << " has the same content as a previously trusted file:\n"
+                      << "  " << match.record->path.string() << "\n";
+            break;
+        case wl2::TrustMatchKind::SamePathDifferentHash:
+            std::cerr << display_script_path(command.script)
+                      << " has changed since its previous trust approval.\n";
+            if (!declared_permission_lines(match.delta).empty()) {
+                std::cerr << "Additional declared permissions:\n";
+                for (const auto& line : declared_permission_lines(match.delta)) {
+                    std::cerr << "  - " << line << '\n';
+                }
+            }
+            break;
+        case wl2::TrustMatchKind::BroaderPermissions:
+            std::cerr << display_script_path(command.script)
+                      << " is already trusted, but requests additional permissions:\n";
+            for (const auto& line : declared_permission_lines(match.delta)) {
+                std::cerr << "  - " << line << '\n';
+            }
+            break;
+        default:
+            break;
+    }
 }
 
 bool approve_declared_permissions(RunCommand& command) {
@@ -820,9 +863,23 @@ bool approve_declared_permissions(RunCommand& command) {
     }
 
     const auto identity = script_trust_identity(command);
-    if (identity && declared_trust_matches(*identity)) {
+    if (command.allowDeclaredPermissions && !command.trustDeclaredPermissions) {
         command.declaredPermissionsApproved = true;
         return true;
+    }
+
+    auto store = load_declared_trust_store();
+    if (!store) {
+        return false;
+    }
+
+    wl2::TrustMatch trustMatch;
+    if (identity) {
+        trustMatch = store->match(identity->path, identity->checksum, command.declaredPermissions);
+        if (trustMatch.kind == wl2::TrustMatchKind::Exact && trustMatch.record) {
+            command.declaredPermissionsApproved = true;
+            return true;
+        }
     }
 
     if (command.allowDeclaredPermissions) {
@@ -834,20 +891,35 @@ bool approve_declared_permissions(RunCommand& command) {
                           << ": unable to hash a filesystem script\n";
                 return false;
             }
-            remember_declared_trust(*identity);
+            if (!remember_declared_trust(*store, *identity, command)) {
+                return false;
+            }
         }
         return true;
     }
     if (!command.interactivePermissions || !stdin_is_terminal()) {
+        if (identity) {
+            print_trust_match_context(command, trustMatch);
+        }
         std::cerr << display_script_path(command.script)
                   << " declares host permissions; rerun with --allow-declared, --trust-declared, or allow them explicitly.\n";
         return false;
     }
-    std::cerr << display_script_path(command.script) << " declares host permissions:\n";
-    for (const auto& line : declared_permission_lines(command)) {
-        std::cerr << "  - " << line << '\n';
+
+    if (identity) {
+        print_trust_match_context(command, trustMatch);
     }
-    std::cerr << "Allow these permissions? [y]es/[a]lways/[n]o ";
+    const bool deltaPrompt = trustMatch.kind == wl2::TrustMatchKind::BroaderPermissions
+        && !declared_permission_lines(trustMatch.delta).empty();
+    if (!deltaPrompt) {
+        std::cerr << display_script_path(command.script) << " declares host permissions:\n";
+        for (const auto& line : declared_permission_lines(command)) {
+            std::cerr << "  - " << line << '\n';
+        }
+    }
+    std::cerr << (deltaPrompt
+            ? "Allow these additional permissions? [y]es / [a]lways / [n]o "
+            : "Allow these permissions? [y]es / [a]lways / [n]o ");
     std::string answer;
     if (!std::getline(std::cin, answer)) {
         return false;
@@ -860,7 +932,9 @@ bool approve_declared_permissions(RunCommand& command) {
                       << ": unable to hash a filesystem script\n";
             return false;
         }
-        remember_declared_trust(*identity);
+        if (!remember_declared_trust(*store, *identity, command)) {
+            return false;
+        }
         command.declaredPermissionsApproved = true;
         return true;
     }
@@ -869,28 +943,245 @@ bool approve_declared_permissions(RunCommand& command) {
     return command.declaredPermissionsApproved;
 }
 
-std::optional<std::string> json_string_field(const std::string& text, const std::string& key) {
-    std::regex pattern("\"" + key + "\"\\s*:\\s*\"([^\"]*)\"");
-    std::smatch match;
-    if (std::regex_search(text, match, pattern)) {
-        return match[1].str();
+std::vector<std::string> trust_record_permission_lines(const wl2::TrustRecord& record) {
+    std::vector<std::string> lines;
+    const auto& permissions = record.permissions;
+    if (permissions.ui) {
+        lines.push_back("UI window access");
     }
-    return std::nullopt;
+    if (permissions.graphics) {
+        lines.push_back("graphics context access");
+    }
+    for (const auto& item : permissions.network) {
+        lines.push_back("network connections matching " + item);
+    }
+    for (const auto& item : permissions.listen) {
+        lines.push_back("network listeners matching " + item);
+    }
+    for (const auto& item : permissions.sharedMemory) {
+        lines.push_back("shared-memory names starting with " + item);
+    }
+    for (const auto& item : permissions.filesystemRead) {
+        std::string line = "filesystem reads under " + item.resolved.string();
+        if (!item.raw.empty() && item.raw != item.resolved.string()) {
+            line += " (" + item.raw + ")";
+        }
+        lines.push_back(line);
+    }
+    return lines;
 }
 
-std::vector<std::string> json_string_array_field(const std::string& text, const std::string& key) {
-    std::vector<std::string> values;
-    std::regex arrayPattern("\"" + key + "\"\\s*:\\s*\\[([^\\]]*)\\]");
-    std::smatch arrayMatch;
-    if (!std::regex_search(text, arrayMatch, arrayPattern)) {
-        return values;
+void print_trust_record_human(const wl2::TrustRecord& record) {
+    std::cout << "id:          " << record.id << '\n';
+    std::cout << "kind:        " << record.kind << '\n';
+    std::cout << "path:        " << record.path.string() << '\n';
+    if (!record.displayPath.empty() && record.displayPath != record.path.string()) {
+        std::cout << "displayPath: " << record.displayPath << '\n';
     }
-    std::string body = arrayMatch[1].str();
-    std::regex valuePattern("\"([^\"]*)\"");
-    for (std::sregex_iterator it(body.begin(), body.end(), valuePattern), end; it != end; ++it) {
-        values.push_back((*it)[1].str());
+    std::cout << "sha256:      " << record.sha256 << '\n';
+    if (!record.grantedAt.empty()) {
+        std::cout << "grantedAt:   " << record.grantedAt << '\n';
     }
-    return values;
+    if (!record.lastUsedAt.empty()) {
+        std::cout << "lastUsedAt:  " << record.lastUsedAt << '\n';
+    }
+    if (!record.source.empty()) {
+        std::cout << "source:      " << record.source << '\n';
+    }
+    const auto lines = trust_record_permission_lines(record);
+    if (lines.empty()) {
+        std::cout << "permissions: (none)\n";
+    } else {
+        std::cout << "permissions:\n";
+        for (const auto& line : lines) {
+            std::cout << "  - " << line << '\n';
+        }
+    }
+}
+
+int trust_list_command(bool json) {
+    auto store = load_declared_trust_store();
+    if (!store) {
+        return 1;
+    }
+    const auto& records = store->records();
+    if (json) {
+        std::cout << wl2::trustRecordsToJsonText(records) << '\n';
+        return 0;
+    }
+    if (records.empty()) {
+        std::cout << "no trust records\n";
+        return 0;
+    }
+    size_t idWidth = std::string("ID").size();
+    size_t permWidth = std::string("PERMISSIONS").size();
+    std::vector<std::string> summaries;
+    summaries.reserve(records.size());
+    for (const auto& record : records) {
+        idWidth = std::max(idWidth, record.id.size());
+        auto summary = wl2::trustPermissionSummary(record.permissions);
+        permWidth = std::max(permWidth, summary.size());
+        summaries.push_back(std::move(summary));
+    }
+    std::cout << std::left << std::setw(static_cast<int>(idWidth)) << "ID" << "  "
+              << std::setw(static_cast<int>(permWidth)) << "PERMISSIONS" << "  "
+              << "PATH" << '\n';
+    for (size_t i = 0; i < records.size(); ++i) {
+        std::cout << std::left << std::setw(static_cast<int>(idWidth)) << records[i].id << "  "
+                  << std::setw(static_cast<int>(permWidth)) << summaries[i] << "  "
+                  << records[i].path.string() << '\n';
+    }
+    return 0;
+}
+
+int trust_show_command(const std::string& id, bool json) {
+    auto store = load_declared_trust_store();
+    if (!store) {
+        return 1;
+    }
+    for (const auto& record : store->records()) {
+        if (record.id == id) {
+            if (json) {
+                std::cout << wl2::trustRecordToJsonText(record) << '\n';
+            } else {
+                print_trust_record_human(record);
+            }
+            return 0;
+        }
+    }
+    std::cerr << "no trust record with id: " << id << '\n';
+    return 1;
+}
+
+int trust_revoke_command(const std::string& id) {
+    auto store = load_declared_trust_store();
+    if (!store) {
+        return 1;
+    }
+    if (!store->revoke(id)) {
+        std::cerr << "no trust record with id: " << id << '\n';
+        return 1;
+    }
+    if (!save_declared_trust_store(*store)) {
+        return 1;
+    }
+    std::cout << "revoked " << id << '\n';
+    return 0;
+}
+
+int trust_clear_command(bool assumeYes) {
+    auto store = load_declared_trust_store();
+    if (!store) {
+        return 1;
+    }
+    if (store->records().empty()) {
+        std::cout << "no trust records\n";
+        return 0;
+    }
+    if (!assumeYes) {
+        if (!stdin_is_terminal()) {
+            std::cerr << "wl2 trust clear needs --yes to remove all trust records non-interactively\n";
+            return 1;
+        }
+        std::cerr << "Remove all " << store->records().size()
+                  << " trust records? [y]es/[n]o ";
+        std::string answer;
+        if (!std::getline(std::cin, answer)) {
+            return 1;
+        }
+        answer = trim_text(answer);
+        if (!(answer == "y" || answer == "Y" || answer == "yes" || answer == "YES")) {
+            std::cerr << "cancelled\n";
+            return 1;
+        }
+    }
+    store->clear();
+    if (!save_declared_trust_store(*store)) {
+        return 1;
+    }
+    std::cout << "cleared all trust records\n";
+    return 0;
+}
+
+int trust_command(int argc, char** argv) {
+    if (argc < 3) {
+        std::cerr << "wl2 trust requires an action: list, show, revoke, clear\n";
+        return 2;
+    }
+    const std::string action(argv[2]);
+    bool json = false;
+    bool assumeYes = false;
+    std::vector<std::string> positionals;
+    for (int i = 3; i < argc; ++i) {
+        const std::string arg(argv[i]);
+        if (arg == "--json") {
+            json = true;
+        } else if (arg == "--yes" || arg == "-y") {
+            assumeYes = true;
+        } else if (!arg.empty() && arg[0] == '-') {
+            std::cerr << "unknown wl2 trust option: " << arg << '\n';
+            return 2;
+        } else {
+            positionals.push_back(arg);
+        }
+    }
+
+    if (action == "list") {
+        return trust_list_command(json);
+    }
+    if (action == "show") {
+        if (positionals.empty()) {
+            std::cerr << "wl2 trust show requires a record id\n";
+            return 2;
+        }
+        return trust_show_command(positionals.front(), json);
+    }
+    if (action == "revoke") {
+        if (positionals.empty()) {
+            std::cerr << "wl2 trust revoke requires a record id\n";
+            return 2;
+        }
+        return trust_revoke_command(positionals.front());
+    }
+    if (action == "clear") {
+        return trust_clear_command(assumeYes);
+    }
+    std::cerr << "unknown trust action: " << action << '\n';
+    return 2;
+}
+
+// A parsed source map's fields relevant to position mapping. Parsing is done
+// once with nlohmann/json rather than by scraping the text with regexes, which
+// could not handle escapes, nested arrays, or reordered keys.
+struct ParsedSourceMap {
+    std::string mappings;
+    std::vector<std::string> sources;
+};
+
+std::optional<ParsedSourceMap> parse_source_map_json(const std::string& text) {
+    nlohmann::json value;
+    try {
+        value = nlohmann::json::parse(text);
+    } catch (const nlohmann::json::exception&) {
+        return std::nullopt;
+    }
+    if (!value.is_object()) {
+        return std::nullopt;
+    }
+    ParsedSourceMap out;
+    if (auto it = value.find("mappings"); it != value.end() && it->is_string()) {
+        out.mappings = it->get<std::string>();
+    } else {
+        return std::nullopt;
+    }
+    if (auto it = value.find("sources"); it != value.end() && it->is_array()) {
+        for (const auto& entry : *it) {
+            if (entry.is_string()) {
+                out.sources.push_back(entry.get<std::string>());
+            }
+        }
+    }
+    return out;
 }
 
 int base64_vlq_value(char ch) {
@@ -1042,12 +1333,12 @@ std::optional<std::string> remap_stack_location(const std::string& file, int lin
     if (!mapText) {
         return std::nullopt;
     }
-    auto mappingsText = json_string_field(*mapText, "mappings");
-    auto sources = json_string_array_field(*mapText, "sources");
-    if (!mappingsText || sources.empty()) {
+    auto parsedMap = parse_source_map_json(*mapText);
+    if (!parsedMap || parsedMap->sources.empty()) {
         return std::nullopt;
     }
-    auto mappings = parse_source_map_mappings(*mappingsText);
+    const auto& sources = parsedMap->sources;
+    auto mappings = parse_source_map_mappings(parsedMap->mappings);
     if (!mappings) {
         return std::nullopt;
     }
@@ -2145,15 +2436,6 @@ std::vector<wl2::DependencyStatus> config_dependency_status(const ConfigCommand&
     return wl2::dependencyStatus(command.manifest->moduleDependencies, lock, depsRoot);
 }
 
-void print_json_string_array(const std::vector<std::string>& values) {
-    std::cout << "[";
-    for (size_t i = 0; i < values.size(); ++i) {
-        if (i) std::cout << ",";
-        std::cout << "\"" << json_escape(values[i]) << "\"";
-    }
-    std::cout << "]";
-}
-
 // Assemble a resolver request from a config/graph command's manifest roots,
 // explicit module paths, and discoverable providers. Provider discovery is
 // best-effort here: errors are ignored so config reporting never aborts.
@@ -2191,107 +2473,108 @@ int config_json_command(const ConfigCommand& command, const wl2::ResourceStore& 
         build_config_resolution_request(command.manifest, command.dynamicModulePaths, projectRoot);
     const auto graphPlan = wl2::resolveModuleGraph(graphRequest);
 
-    std::cout << "{\n";
-    std::cout << "  \"engine\":\"" << wl2_engine_name() << "\",\n";
-    std::cout << "  \"manifest\":";
+    using ojson = nlohmann::ordered_json;
+    ojson root;
+    root["engine"] = wl2_engine_name();
     if (command.manifest) {
-        std::cout << "{\"path\":\"" << json_escape(command.manifest->path.string())
-                  << "\",\"schema\":\"" << json_escape(command.manifest->schema)
-                  << "\",\"entry\":\"" << json_escape(command.manifest->entrySpecifier())
-                  << "\",\"root\":\"" << json_escape(command.manifest->resolvedRoot().string()) << "\"}";
+        root["manifest"] = ojson{
+            {"path", command.manifest->path.string()},
+            {"schema", command.manifest->schema},
+            {"entry", command.manifest->entrySpecifier()},
+            {"root", command.manifest->resolvedRoot().string()},
+        };
     } else {
-        std::cout << "null";
+        root["manifest"] = nullptr;
     }
-    std::cout << ",\n  \"modules\":{\"require\":";
-    if (command.manifest) print_json_string_array(command.manifest->requiredModules); else std::cout << "[]";
-    std::cout << ",\"optional\":";
-    if (command.manifest) print_json_string_array(command.manifest->optionalModules); else std::cout << "[]";
-    std::cout << ",\"installed\":[";
-    for (size_t i = 0; i < installed.size(); ++i) {
-        const auto& record = installed[i];
-        if (i) std::cout << ",";
-        std::cout << "{\"name\":\"" << json_escape(record.name)
-                  << "\",\"version\":\"" << json_escape(record.version)
-                  << "\",\"build\":\"" << json_escape(record.build)
-                  << "\",\"scope\":\"" << wl2::moduleScopeName(record.scope)
-                  << "\",\"library\":\"" << json_escape(record.libraryPath.string())
-                  << "\",\"shadowed\":" << (record.shadowed ? "true" : "false") << "}";
+
+    ojson modules;
+    modules["require"] =
+        command.manifest ? command.manifest->requiredModules : std::vector<std::string>{};
+    modules["optional"] =
+        command.manifest ? command.manifest->optionalModules : std::vector<std::string>{};
+    ojson installedArray = ojson::array();
+    for (const auto& record : installed) {
+        installedArray.push_back(ojson{
+            {"name", record.name},
+            {"version", record.version},
+            {"build", record.build},
+            {"scope", wl2::moduleScopeName(record.scope)},
+            {"library", record.libraryPath.string()},
+            {"shadowed", record.shadowed},
+        });
     }
-    std::cout << "]},\n";
-    std::cout << "  \"graph\":{\"selected\":[";
+    modules["installed"] = std::move(installedArray);
+    root["modules"] = std::move(modules);
+
+    ojson selected = ojson::array();
     if (graphPlan) {
-        for (size_t i = 0; i < graphPlan.value().loadOrder.size(); ++i) {
-            const auto& resolved = graphPlan.value().loadOrder[i];
+        for (const auto& resolved : graphPlan.value().loadOrder) {
             const auto& provider = resolved.provider;
-            if (i) std::cout << ",";
-            std::cout << "{\"name\":\"" << json_escape(provider.info.name)
-                      << "\",\"version\":\"" << json_escape(provider.info.version)
-                      << "\",\"build\":\"" << json_escape(provider.info.build)
-                      << "\",\"source\":\"" << wl2::moduleProviderSourceName(provider.source)
-                      << "\",\"optional\":" << (resolved.optional ? "true" : "false") << "}";
+            selected.push_back(ojson{
+                {"name", provider.info.name},
+                {"version", provider.info.version},
+                {"build", provider.info.build},
+                {"source", wl2::moduleProviderSourceName(provider.source)},
+                {"optional", resolved.optional},
+            });
         }
     }
-    std::cout << "]},\n";
-    std::cout << "  \"resources\":[";
-    const auto mounts = store.mounts();
-    for (size_t i = 0; i < mounts.size(); ++i) {
-        if (i) std::cout << ",";
-        std::cout << "{\"prefix\":\"" << json_escape(mounts[i].prefix)
-                  << "\",\"root\":\"" << json_escape(mounts[i].root.string()) << "\"}";
+    root["graph"] = ojson{{"selected", std::move(selected)}};
+
+    ojson resources = ojson::array();
+    for (const auto& mount : store.mounts()) {
+        resources.push_back(ojson{
+            {"prefix", mount.prefix},
+            {"root", mount.root.string()},
+        });
     }
-    std::cout << "],\n";
-    std::cout << "  \"filesystem\":{\"scriptLoading\":true,\"moduleReads\":false},\n";
+    root["resources"] = std::move(resources);
+
+    root["filesystem"] = ojson{{"scriptLoading", true}, {"moduleReads", false}};
+
     {
         // Capability policy is denied by default; the CLI does not enable host
         // capabilities, so it reports the default (effective) policy.
         const wl2::RuntimeOptions defaults;
-        std::cout << "  \"capabilities\":{\"network\":{\"allow\":"
-                  << (defaults.allowNetwork ? "true" : "false") << ",\"allowList\":";
-        print_json_string_array(defaults.networkAllowList);
-        std::cout << "},\"listen\":{\"allow\":"
-                  << (defaults.allowListening ? "true" : "false") << ",\"allowList\":";
-        print_json_string_array(defaults.listenAllowList);
         const bool uiAllowed = command.manifest ? command.manifest->allowUi : defaults.allowUi;
-        std::cout << "},\"ui\":{\"allow\":"
-                  << (uiAllowed ? "true" : "false") << "},\"graphics\":{\"allow\":"
-                  << (defaults.allowGraphics ? "true" : "false")
-                  << "},\"sharedMemory\":{\"allow\":"
-                  << (defaults.allowSharedMemory ? "true" : "false") << ",\"allowList\":";
-        print_json_string_array(defaults.sharedMemoryAllowList);
-        std::cout << "}},\n";
+        root["capabilities"] = ojson{
+            {"network", ojson{{"allow", defaults.allowNetwork}, {"allowList", defaults.networkAllowList}}},
+            {"listen", ojson{{"allow", defaults.allowListening}, {"allowList", defaults.listenAllowList}}},
+            {"ui", ojson{{"allow", uiAllowed}}},
+            {"graphics", ojson{{"allow", defaults.allowGraphics}}},
+            {"sharedMemory", ojson{{"allow", defaults.allowSharedMemory}, {"allowList", defaults.sharedMemoryAllowList}}},
+        };
     }
-    std::cout << "  \"dependencies\":[";
-    for (size_t i = 0; i < depStatuses.size(); ++i) {
-        const auto& status = depStatuses[i];
-        if (i) std::cout << ",";
-        std::cout << "{\"name\":\"" << json_escape(status.name)
-                  << "\",\"tag\":\"" << json_escape(status.tag)
-                  << "\",\"lockedCommit\":\"" << json_escape(status.lockedCommit)
-                  << "\",\"fetched\":" << (status.fetched ? "true" : "false") << "}";
+
+    ojson dependencies = ojson::array();
+    for (const auto& status : depStatuses) {
+        dependencies.push_back(ojson{
+            {"name", status.name},
+            {"tag", status.tag},
+            {"lockedCommit", status.lockedCommit},
+            {"fetched", status.fetched},
+        });
     }
-    std::cout << "],\n";
-    std::cout << "  \"diagnostics\":[";
-    bool firstDiagnostic = true;
-    auto emitDiagnostic = [&](const std::string& text) {
-        if (!firstDiagnostic) std::cout << ",";
-        std::cout << "\"" << json_escape(text) << "\"";
-        firstDiagnostic = false;
-    };
+    root["dependencies"] = std::move(dependencies);
+
+    std::vector<std::string> diagnostics;
     if (command.manifest && !command.manifest->moduleDependencies.empty()
         && !std::filesystem::is_regular_file(command.manifest->baseDir / "wl2.lock.yml")) {
-        emitDiagnostic("lockfile missing; run wl2 deps lock");
+        diagnostics.push_back("lockfile missing; run wl2 deps lock");
     }
     if (graphPlan) {
         for (const auto& diagnostic : graphPlan.value().diagnostics) {
-            emitDiagnostic(diagnostic.code + ": " + diagnostic.message);
+            diagnostics.push_back(diagnostic.code + ": " + diagnostic.message);
         }
     } else {
-        emitDiagnostic(graphPlan.error().code() + ": " + graphPlan.error().message());
+        diagnostics.push_back(graphPlan.error().code() + ": " + graphPlan.error().message());
     }
-    if (firstDiagnostic) {
-        std::cout << "\"ok\"";
+    if (diagnostics.empty()) {
+        diagnostics.push_back("ok");
     }
-    std::cout << "]\n}\n";
+    root["diagnostics"] = diagnostics;
+
+    std::cout << root.dump(2) << '\n';
     return 0;
 }
 
@@ -3076,48 +3359,45 @@ void append_project_module_providers(
 void print_module_graph_json(
     const wl2::ModuleResolutionRequest& request,
     const wl2::ModuleResolutionPlan& plan) {
-    std::cout << "{\n";
-    std::cout << "  \"roots\":{\"required\":[";
-    bool first = true;
+    using ojson = nlohmann::ordered_json;
+    std::vector<std::string> required;
+    std::vector<std::string> optional;
     for (const auto& root : request.roots) {
-        if (root.kind != wl2::ModuleDependencyKind::Required) continue;
-        if (!first) std::cout << ",";
-        first = false;
-        std::cout << "\"" << json_escape(root.name) << "\"";
+        if (root.kind == wl2::ModuleDependencyKind::Required) {
+            required.push_back(root.name);
+        } else if (root.kind == wl2::ModuleDependencyKind::Optional) {
+            optional.push_back(root.name);
+        }
     }
-    std::cout << "],\"optional\":[";
-    first = true;
-    for (const auto& root : request.roots) {
-        if (root.kind != wl2::ModuleDependencyKind::Optional) continue;
-        if (!first) std::cout << ",";
-        first = false;
-        std::cout << "\"" << json_escape(root.name) << "\"";
-    }
-    std::cout << "]},\n";
-    std::cout << "  \"modules\":[";
-    for (size_t i = 0; i < plan.loadOrder.size(); ++i) {
-        const auto& resolved = plan.loadOrder[i];
+
+    ojson modules = ojson::array();
+    for (const auto& resolved : plan.loadOrder) {
         const auto& provider = resolved.provider;
-        if (i) std::cout << ",";
-        std::cout << "{\"name\":\"" << json_escape(provider.info.name)
-                  << "\",\"version\":\"" << json_escape(provider.info.version)
-                  << "\",\"build\":\"" << json_escape(provider.info.build)
-                  << "\",\"source\":\"" << wl2::moduleProviderSourceName(provider.source)
-                  << "\",\"path\":\"" << json_escape(provider.path.string())
-                  << "\",\"optional\":" << (resolved.optional ? "true" : "false") << "}";
+        modules.push_back(ojson{
+            {"name", provider.info.name},
+            {"version", provider.info.version},
+            {"build", provider.info.build},
+            {"source", wl2::moduleProviderSourceName(provider.source)},
+            {"path", provider.path.string()},
+            {"optional", resolved.optional},
+        });
     }
-    std::cout << "],\n";
-    std::cout << "  \"diagnostics\":[";
-    for (size_t i = 0; i < plan.diagnostics.size(); ++i) {
-        const auto& diagnostic = plan.diagnostics[i];
-        if (i) std::cout << ",";
-        std::cout << "{\"code\":\"" << json_escape(diagnostic.code)
-                  << "\",\"message\":\"" << json_escape(diagnostic.message)
-                  << "\",\"chain\":";
-        print_json_string_array(diagnostic.chain);
-        std::cout << "}";
+
+    ojson diagnostics = ojson::array();
+    for (const auto& diagnostic : plan.diagnostics) {
+        diagnostics.push_back(ojson{
+            {"code", diagnostic.code},
+            {"message", diagnostic.message},
+            {"chain", diagnostic.chain},
+        });
     }
-    std::cout << "]\n}\n";
+
+    ojson root = ojson{
+        {"roots", ojson{{"required", required}, {"optional", optional}}},
+        {"modules", std::move(modules)},
+        {"diagnostics", std::move(diagnostics)},
+    };
+    std::cout << root.dump(2) << '\n';
 }
 
 void print_module_graph_text(const wl2::ModuleResolutionPlan& plan) {
@@ -3964,6 +4244,10 @@ int main(int argc, char** argv) {
 
     if (command == "init") {
         return init_command(argc, argv);
+    }
+
+    if (command == "trust") {
+        return trust_command(argc, argv);
     }
 
     if (is_planned_subcommand(command)) {

@@ -13,6 +13,7 @@ add_executable(wl2_core_tests
     runtime_tests.cpp
     script_thread_tests.cpp
     thread_tree_tests.cpp)
+target_sources(wl2_core_tests PRIVATE trust_store_tests.cpp)
 
 target_link_libraries(wl2_core_tests PRIVATE wl2_core)
 
@@ -80,6 +81,7 @@ add_test(NAME core.module_store COMMAND wl2_core_tests module_store)
 add_test(NAME core.module_deps COMMAND wl2_core_tests module_deps)
 add_test(NAME core.module_resolver COMMAND wl2_core_tests module_resolver)
 add_test(NAME core.app_store COMMAND wl2_core_tests app_store)
+add_test(NAME core.trust_store COMMAND wl2_core_tests trust_store)
 add_test(NAME core.script_thread COMMAND wl2_core_tests script_thread)
 add_test(NAME core.script_thread.javascript_api COMMAND wl2_core_tests script_thread javascript_api)
 add_test(NAME core.script_thread.force_close COMMAND wl2_core_tests script_thread force_close)
@@ -125,6 +127,8 @@ set_tests_properties(core.module_resolver PROPERTIES
     LABELS "unit;modules")
 set_tests_properties(core.app_store PROPERTIES
     LABELS "unit;apps")
+set_tests_properties(core.trust_store PROPERTIES
+    LABELS "unit;trust")
 set_tests_properties(core.script_thread PROPERTIES
     LABELS "unit;thread"
     TIMEOUT 60)

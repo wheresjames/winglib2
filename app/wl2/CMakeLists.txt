@@ -6,6 +6,10 @@ wl2_generate_static_module_registry(
 add_executable(wl2 main.cpp "${_wl2_builtin_static_modules_source}")
 target_link_libraries(wl2 PRIVATE wl2_core ${_wl2_builtin_static_module_targets})
 
+# The runner uses nlohmann/json directly for CLI JSON parsing and reporting,
+# the same required core dependency behind the wl2:json module and TrustStore.
+target_link_libraries(wl2 PRIVATE nlohmann_json::nlohmann_json)
+
 # Export the runner's dynamic symbols so dynamically loaded native modules can
 # resolve host-provided symbols (the JavaScript engine, wl2 runtime) at dlopen.
 set_target_properties(wl2 PROPERTIES ENABLE_EXPORTS ON)

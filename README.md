@@ -348,6 +348,55 @@ denied UI, graphics, or shared-memory requests can prompt the user. Tests and
 automation should pass `--no-permission-prompt` so denied capability checks fail
 immediately and deterministically.
 
+**Declared permissions and trust.** A script can declare the host permissions it
+needs in a leading `/* wl2 ... */` block:
+
+```js
+/* wl2
+permissions:
+  listen: ["127.0.0.1:8080"]
+  network: ["127.0.0.1:*"]
+  filesystemRead: ["${HOME}/Videos"]
+*/
+```
+
+On an interactive terminal `wl2 run` shows the declared envelope and asks:
+
+```text
+server.js declares host permissions:
+  - network listeners matching 127.0.0.1:8080
+  - network connections matching 127.0.0.1:*
+Allow these permissions? [y]es once/[a]lways for this path/[n]o
+```
+
+- `y` approves the envelope for this run only.
+- `a` persists trust to `$XDG_CONFIG_HOME/wl2/trust.json` (falling back to
+  `~/.config/wl2/trust.json`), keyed by the script's canonical path **and** its
+  exact content hash.
+- `n` denies and exits.
+
+`--allow-declared` approves the declared envelope for one run without prompting;
+`--trust-declared` approves and persists it. A trusted script auto-approves on
+later runs only when both its path and content hash still match and its requested
+permissions are contained by the stored envelope. Changed content, a moved file,
+or broader permissions re-prompt (and show the added permissions as a delta).
+Non-interactive runs never prompt: they auto-approve only from a matching trust
+record or an explicit `--allow-declared`/`--trust-declared` flag.
+
+**Managing trust.** Inspect and revoke persisted approvals with `wl2 trust`:
+
+```sh
+wl2 trust list             # id, permission summary, and path per record
+wl2 trust list --json      # machine-readable records
+wl2 trust show <id>        # full permission envelope for one record
+wl2 trust show <id> --json
+wl2 trust revoke <id>      # remove a single record
+wl2 trust clear --yes      # remove all records
+```
+
+The store is plain JSON under your config directory, so you can also inspect,
+back up, or edit it directly.
+
 **Shebang scripts** work when `wl2` is on your `PATH`:
 
 ```js

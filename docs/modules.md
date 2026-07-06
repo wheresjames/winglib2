@@ -199,9 +199,10 @@ wl2_module_package_config_fragment(CONTENT "...")
 ```
 
 `wl2_add_module()` builds the static target when `WL2_BUILD_STATIC_MODULES=ON`
-(default) and the dynamic `MODULE` target when `WL2_BUILD_SHARED_MODULES=ON`.
-Install, export, runner linkage, and static registration are driven from the
-module registry. The root build discovers modules with `wl2_add_modules()`, so
+and the dynamic `MODULE` target when `WL2_BUILD_SHARED_MODULES=ON`; both derive
+from `WL2_MODULE_LINKAGE` (`both` by default, or `dynamic`/`static`). Install,
+export, staging into the dynamic module store, runner linkage, and static
+registration are driven from the module registry. The root build discovers modules with `wl2_add_modules()`, so
 new modules should not be manually wired in the root build or `app/wl2/`.
 Module-specific examples and tests should be added by the owning module, using
 `wl2_add_module_tests()` for a module-local `test/` directory.
@@ -642,8 +643,10 @@ override, mirroring `--map-resource`.
   resolves those symbols from the host at load time. The host executable must
   export its dynamic symbols (`ENABLE_EXPORTS`, i.e. `-rdynamic`); the `wl2`
   runner does. The module itself does not link the engine.
-- **No directory scanning.** Modules are loaded only from explicit paths, never
-  by scanning directories.
+- **Anchored stores only.** Beyond explicit `--load-module` paths, modules
+  resolve from anchored module stores (project, build/executable-adjacent,
+  install-prefix, user, system — see *Installed Dynamic Module Store* below).
+  The shell's current working directory is never an implicit module root.
 
 See [`examples/modules/wl2_echo`](../examples/modules/wl2_echo), whose dynamic
 target loads and registers through this ABI and is exercised by the
@@ -775,18 +778,22 @@ Install also records a `sha256` content checksum of the library in
 module, its library is re-hashed and compared to the recorded checksum; a stale
 or tampered library is rejected with `module_checksum_mismatch` (or
 `module_library_missing` when the file is gone). A required module aborts the
-run; an optional one is skipped with a diagnostic. Legacy installs without a
-recorded checksum are loaded without verification.
+run; an optional one is skipped with a diagnostic. An installed record with no
+recorded checksum (a legacy or hand-authored scope) yields
+`module_checksum_missing`: a warning, after which the module still loads without
+verification.
 
 `wl2 module list --scope all` shows every installed module across scopes; omit
 `--scope` for the same default, or pass `local`, `user`, or `system` to filter
 one scope. `wl2 module uninstall <name>` removes one. When a name is installed
 in more than one scope, uninstall requires `--scope`.
 
-Module **resolution order** is: explicit `--load-module`, project source
-dependencies, then `local`, `user`, `system`, then built-in (statically linked)
-modules. A module found in an earlier source shadows the same name in a later
-one. `wl2 run` resolves the modules a manifest declares in
+Module **resolution order** is: explicit `--load-module`, explicit module-path
+directories (`--module-path` / `WL2_MODULE_PATH`), project source dependencies,
+`local`, the build-tree / executable-adjacent store, the compiled install-prefix
+store, then `user`, `system`, and finally built-in (statically linked) modules.
+A module found in an earlier source shadows the same name in a later one. `wl2
+run` resolves the modules a manifest declares in
 `modules.require`/`modules.optional` — **and their transitive module
 dependencies** — through the graph resolver, then loads the selected dynamic
 modules in dependency-first (topological) order. An app that requires module A
@@ -794,6 +801,107 @@ therefore loads A's installed dependency B automatically. `wl2 config` lists
 installed modules and marks any that are **shadowed** by a higher-priority
 scope; `wl2 config --json` and `wl2 module graph` report the resolved graph and
 stable dependency diagnostics.
+
+### Installed Dynamic Module Store
+
+An installed Winglib2 ships its dynamic runtime modules in a dedicated store
+under the library tree, separate from normal link libraries:
+
+```text
+<prefix>/
+  bin/wl2
+  lib/libwl2_core.a               # linkable SDK artifacts
+  lib/libwl2_<name>_static.a      # static module link artifacts (exported as
+                                  # winglib2::wl2_<name>_static)
+  lib/wl2/modules/                # dynamic runtime module store
+    index.yml
+    wl2_json/
+      wl2.module.yml              # name, version, abi, sha256, dependencies
+      libwl2_json.so
+      deps/                       # optional module-owned shared libraries
+    wl2_curl/
+      ...
+```
+
+Dynamic runtime modules are **not** exported as CMake link targets; C++
+embedders link the `winglib2::wl2_<name>_static` archives instead. The store is
+installed from the staged build-tree store (`build/lib/wl2/modules`), so build
+and installed metadata (including `sha256` checksums) are identical.
+
+The runner discovers installed stores two ways, in order:
+
+1. **Executable-adjacent**: `dirname(realpath(argv[0]))/../lib/wl2/modules`,
+   which makes relocatable install trees and staged packages work.
+2. **Compiled prefix**: `${CMAKE_INSTALL_FULL_LIBDIR}/wl2/modules` recorded at
+   build time, which catches traditional non-relocatable installs.
+
+Both paths are canonicalized and deduplicated. The compiled *build-tree* store
+path participates only when it is executable-adjacent (i.e. the running binary
+is the build-tree runner); an installed or relocated `wl2` never loads modules
+from a stale absolute build directory.
+
+Module-owned shared dependencies live beside the payload or under its `deps/`
+directory. Dynamic modules are built with `$ORIGIN`/`$ORIGIN/deps` RUNPATH
+(`@loader_path` on macOS), so bundled libraries resolve without
+`LD_LIBRARY_PATH`. Pass `DYNAMIC_BUNDLED_LIBRARIES <files...>` to
+`wl2_add_module()` to stage extra shared libraries into the module's `deps/`
+directory.
+
+### Search Policies
+
+`wl2 run`, `wl2 config`, and `wl2 module graph` accept
+`--module-policy <policy>` to control which provider sources participate:
+
+| Policy           | Sources                                                            |
+|------------------|--------------------------------------------------------------------|
+| `default`        | explicit, project, build/exec-adjacent, install-prefix, user, system, builtin |
+| `isolated`       | explicit, project, build/exec-adjacent, builtin                    |
+| `project-only`   | explicit and project-local modules only                            |
+| `installed-only` | explicit plus executable-adjacent and install-prefix stores only   |
+| `system`         | explicit plus user/system stores and builtin                       |
+
+CI and package validation should use `isolated` or `installed-only` so a
+developer's user module store cannot make a test pass (or shadow the store
+under test).
+
+### Module Path Override
+
+`--module-path <dir>` (repeatable, also `--module-path=<dir>`) and the
+`WL2_MODULE_PATH` environment variable add explicit module-path directories to
+the resolver. A module-path directory is a module store (it contains
+`<slug>/wl2.module.yml` payloads, the same layout as an installed scope). The
+env variable seeds the list first, then `--module-path` appends; entries are
+canonicalized and de-duplicated.
+
+Module-path providers rank between `--load-module` and project sources, so they
+override project, build-tree, install-prefix, user, system, and built-in
+providers. Unlike those, module-path is **always on when set** — it is an
+explicit opt-in and is not gated by `--module-policy`, so `WL2_MODULE_PATH` can
+satisfy a module even under `project-only`. Module-path providers still
+participate in normal metadata validation (checksum verification when a sha256 is
+recorded). `wl2 config` (text and `--json`) lists the active module paths, and
+`wl2 module graph` reports module-path selections with the `module-path` source.
+
+### Dynamic→static fallback
+
+By default the dynamic runner (`WL2_WL2_MODULE_MODE=dynamic`) links an empty
+static registry, so a missing required dynamic module fails with
+`module_required_missing` even when a static archive was built — there is no
+silent fallback. To opt into a dynamic-first runner that can fall back to a
+statically linked module, build with
+`WL2_WL2_MODULE_MODE=dynamic-with-static-fallback` (requires
+`WL2_MODULE_LINKAGE=static` or `both`). That runner links the full static
+registry and resolves dynamic modules first, falling back to the built-in static
+module only when no dynamic provider is available.
+
+`wl2 run` accepts `--allow-builtin-module-fallback` and
+`--no-builtin-module-fallback` to toggle the fallback at run time. In a
+`dynamic-with-static-fallback` build the fallback is on by default; pass
+`--no-builtin-module-fallback` to force a missing dynamic module to fail (useful
+for hermetic tests). In a pure `dynamic` build the static registry is empty, so
+`--allow-builtin-module-fallback` is a documented no-op. A `static` runner uses
+built-in modules as the primary path, not a fallback, so the flags do not apply
+there.
 
 ### Uninstall Safety
 
@@ -834,5 +942,6 @@ stable dependency diagnostics.
 10. Add a standalone JS example under `examples/js/<name>/` with a
     `examples.js.<name>_standalone` test.
 11. Document the module in `README.md` and link back to this file.
-12. Build the default and `-DWL2_BUILD_SHARED_MODULES=ON` configurations, then run
-    the suite.
+12. Build the default (`WL2_MODULE_LINKAGE=both`) configuration and run the
+    suite; the `outoftree.linkage_static` / `outoftree.linkage_dynamic` tests
+    cover the single-linkage modes.

@@ -27,12 +27,12 @@ wl2_add_module(wl2_3d
     PUBLIC_LINK_LIBRARIES wl2_core
     PRIVATE_LINK_LIBRARIES ${WL2_3D_MAGNUM_TARGETS}
     DYNAMIC_INCLUDE_DIRS ${PROJECT_SOURCE_DIR}/include
-    NO_DYNAMIC_LINK_LIBRARIES
+    DYNAMIC_LINK_LIBRARIES ${WL2_3D_MAGNUM_TARGETS}
     STATIC_PRIVATE_COMPILE_DEFINITIONS WL2_3D_STATIC_MODULE=1 WL2_3D_HAVE_MAGNUM=${_wl2_3d_have_magnum_define} WL2_3D_GPU_SAMPLES=${WL2_3D_GPU_SAMPLES}
     DYNAMIC_PRIVATE_COMPILE_DEFINITIONS WL2_VERSION="${PROJECT_VERSION}" WL2_3D_HAVE_MAGNUM=${_wl2_3d_have_magnum_define} WL2_3D_GPU_SAMPLES=${WL2_3D_GPU_SAMPLES})
 
 if(WL2_3D_HAVE_MAGNUM AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    foreach(_wl2_3d_target wl2_3d_static wl2_3d_shared)
+    foreach(_wl2_3d_target wl2_3d_static wl2_3d)
         if(TARGET ${_wl2_3d_target})
             target_compile_options(${_wl2_3d_target} PRIVATE -Wno-cpp)
         endif()

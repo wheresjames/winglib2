@@ -1,0 +1,13 @@
+schema: wl2.resources.v1
+prefix: wl2:/fs-inspect
+root: .
+entry: main.js
+
+modules:
+  require:
+    - wl2:fs
+
+resources:
+  store:
+    files:
+      - main.js

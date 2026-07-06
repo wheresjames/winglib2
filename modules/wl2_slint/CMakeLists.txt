@@ -30,6 +30,30 @@ if(WL2_HAVE_NFD)
     endif()
 endif()
 
+# When Slint comes from a staged prebuilt package (fetch/local/source), its
+# shared library is not on any consumer's loader path; bundle it into the
+# dynamic module's deps/ directory so the installed store payload resolves it
+# through the module's $ORIGIN/deps runpath. A system Slint package resolves
+# through the normal system loader path instead.
+# slint_cpp-shared is an imported target scoped to this directory, so its
+# location is resolved here rather than left as a generator expression the
+# global staging script could not evaluate.
+set(_wl2_slint_bundled_libs)
+if(NOT WL2_SLINT_PROVIDER_USED STREQUAL "package" AND TARGET slint_cpp-shared)
+    get_target_property(_wl2_slint_cpp_location slint_cpp-shared IMPORTED_LOCATION)
+    if(NOT _wl2_slint_cpp_location)
+        foreach(_wl2_slint_config RELEASE RELWITHDEBINFO MINSIZEREL DEBUG NOCONFIG)
+            get_target_property(_wl2_slint_cpp_location slint_cpp-shared IMPORTED_LOCATION_${_wl2_slint_config})
+            if(_wl2_slint_cpp_location)
+                break()
+            endif()
+        endforeach()
+    endif()
+    if(_wl2_slint_cpp_location)
+        set(_wl2_slint_bundled_libs "${_wl2_slint_cpp_location}")
+    endif()
+endif()
+
 wl2_add_module(wl2_slint
     MODULE_NAME wl2:slint
     REGISTER_FUNCTION wl2_slint_register_module
@@ -40,6 +64,7 @@ wl2_add_module(wl2_slint
     PRIVATE_LINK_LIBRARIES ${_wl2_slint_private_libs}
     DYNAMIC_INCLUDE_DIRS ${PROJECT_SOURCE_DIR}/include
     DYNAMIC_LINK_LIBRARIES ${_wl2_slint_dynamic_libs}
+    DYNAMIC_BUNDLED_LIBRARIES ${_wl2_slint_bundled_libs}
     STATIC_PRIVATE_COMPILE_DEFINITIONS WL2_SLINT_STATIC_MODULE=1 ${_wl2_slint_private_defs}
     DYNAMIC_PRIVATE_COMPILE_DEFINITIONS WL2_VERSION="${PROJECT_VERSION}" ${_wl2_slint_private_defs})
 

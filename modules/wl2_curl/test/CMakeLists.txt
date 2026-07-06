@@ -7,7 +7,8 @@ add_test(NAME scripts.wl2_curl_smoke
     COMMAND
         wl2_curl_fixture
         $<TARGET_FILE:wl2>
-        ${CMAKE_CURRENT_SOURCE_DIR}/js/wl2_curl_smoke.js)
+        ${CMAKE_CURRENT_SOURCE_DIR}/js/wl2_curl_smoke.js
+        ${CMAKE_CURRENT_SOURCE_DIR}/js/wl2_curl_permission_denied.js)
 set_tests_properties(scripts.wl2_curl_smoke PROPERTIES
     LABELS "js;curl;integration;smoke"
     TIMEOUT 15)

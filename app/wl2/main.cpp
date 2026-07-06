@@ -47,11 +47,101 @@ void wl2_append_builtin_static_module_names(std::vector<std::string>& names);
 
 namespace {
 
+// Module search policy: which provider sources participate in resolution.
+// Mirrors the policies described in WL2-DYNAMIC.md so CI/package validation can
+// exclude user or system module stores.
+enum class ModulePolicy {
+    Default,        ///< explicit, project, build/exec-adjacent, install-prefix, user, system, builtin
+    Isolated,       ///< explicit, project, build/exec-adjacent, builtin
+    ProjectOnly,    ///< explicit and project-local modules only
+    InstalledOnly,  ///< explicit plus executable-adjacent and install-prefix stores only
+    System,         ///< explicit plus user/system stores and builtin
+};
+
+std::optional<ModulePolicy> parse_module_policy(std::string_view value) {
+    if (value == "default") return ModulePolicy::Default;
+    if (value == "isolated") return ModulePolicy::Isolated;
+    if (value == "project-only") return ModulePolicy::ProjectOnly;
+    if (value == "installed-only") return ModulePolicy::InstalledOnly;
+    if (value == "system") return ModulePolicy::System;
+    return std::nullopt;
+}
+
+// Which provider sources a policy admits. Single source of truth shared by
+// `append_module_providers` (run/config/graph) and the run fallback so their
+// search rules cannot drift apart. Mirrors the policy table in WL2-DYNAMIC.md.
+struct ModulePolicyFlags {
+    bool project = false;        ///< Project-local module directories.
+    bool execAdjacent = false;  ///< Executable-adjacent build/install store.
+    bool compiledPrefix = false;///< Compiled install-prefix module store.
+    bool userSystem = false;     ///< User and system install scopes.
+    bool builtin = false;        ///< Built-in static modules.
+};
+
+ModulePolicyFlags module_policy_flags(ModulePolicy policy) {
+    switch (policy) {
+        case ModulePolicy::Default:
+            return {.project = true, .execAdjacent = true,
+                    .compiledPrefix = true, .userSystem = true, .builtin = true};
+        case ModulePolicy::Isolated:
+            return {.project = true, .execAdjacent = true,
+                    .compiledPrefix = false, .userSystem = false, .builtin = true};
+        case ModulePolicy::ProjectOnly:
+            return {.project = true, .execAdjacent = false,
+                    .compiledPrefix = false, .userSystem = false, .builtin = false};
+        case ModulePolicy::InstalledOnly:
+            return {.project = false, .execAdjacent = true,
+                    .compiledPrefix = true, .userSystem = false, .builtin = false};
+        case ModulePolicy::System:
+            return {.project = false, .execAdjacent = false,
+                    .compiledPrefix = false, .userSystem = true, .builtin = true};
+    }
+    return {};
+}
+
+// Effective dynamic→static fallback for the runner. In a static runner built
+// modules are the primary path, not a fallback, so fallback is always on. In a
+// dynamic runner the CLI flag (`--allow-builtin-module-fallback` /
+// `--no-builtin-module-fallback`) overrides the build default
+// (`WL2_BUILTIN_FALLBACK_DEFAULT`); a pure-dynamic runner links an empty static
+// registry, so an empty default means no fallback regardless of the flag.
+bool effective_builtin_fallback(std::optional<bool> cliOverride) {
+#if defined(WL2_RUNNER_STATIC_MODE) && WL2_RUNNER_STATIC_MODE
+    return true;
+#else
+    return cliOverride.value_or(
+#if defined(WL2_BUILTIN_FALLBACK_DEFAULT)
+        WL2_BUILTIN_FALLBACK_DEFAULT
+#else
+        false
+#endif
+    );
+#endif
+}
+
 // Module provider assembly helpers, defined later in this file and used by the
 // run/config/graph commands to build a resolver request.
 void append_installed_module_providers(
     std::vector<wl2::ModuleProvider>& providers,
-    const std::filesystem::path& projectRoot);
+    const std::filesystem::path& projectRoot,
+    bool includeLocalScope,
+    bool includeUserSystemScopes);
+wl2::ModuleScopePaths build_tree_module_scope_paths();
+std::filesystem::path current_executable_path();
+bool build_tree_store_is_executable_adjacent();
+void warn_if_module_store_invalid(const std::filesystem::path& storeDir);
+void append_build_tree_module_providers(std::vector<wl2::ModuleProvider>& providers);
+std::vector<std::filesystem::path> install_prefix_module_dirs(bool includeCompiledPrefix);
+std::vector<wl2::InstalledModuleRecord> install_prefix_module_records(bool includeCompiledPrefix);
+void append_install_prefix_module_providers(
+    std::vector<wl2::ModuleProvider>& providers,
+    bool includeCompiledPrefix);
+void append_module_path_providers(
+    std::vector<wl2::ModuleProvider>& providers,
+    const std::vector<std::filesystem::path>& dirs);
+std::vector<wl2::InstalledModuleRecord> module_path_module_records(
+    const std::vector<std::filesystem::path>& dirs);
+std::vector<std::filesystem::path> read_env_module_paths();
 wl2::Result<void> append_builtin_module_providers(std::vector<wl2::ModuleProvider>& providers);
 wl2::Result<void> append_explicit_module_providers(
     std::vector<wl2::ModuleProvider>& providers,
@@ -59,6 +149,52 @@ wl2::Result<void> append_explicit_module_providers(
 void append_project_module_providers(
     std::vector<wl2::ModuleProvider>& providers,
     const wl2::ResourceManifest& manifest);
+
+// Assemble the discoverable providers that participate in module resolution
+// under @p policy. run/config/graph all use this one function so their search
+// behavior cannot drift apart. Explicit --load-module providers are appended by
+// each caller first, because their error handling differs per command. The only
+// error this function reports is builtin module registration failure.
+//
+// `modulePaths` are explicit module-path directories (`--module-path` /
+// WL2_MODULE_PATH); they rank just below --load-module and are always on when
+// non-empty, independent of `policy`. `allowBuiltinFallback` gates whether
+// built-in static module providers participate; it is the build default except
+// in `wl2 run`, where the runner computes the effective value from the CLI
+// flags so the resolver and the runtime's static registry stay in sync.
+wl2::Result<void> append_module_providers(
+    std::vector<wl2::ModuleProvider>& providers,
+    ModulePolicy policy,
+    const wl2::ResourceManifest* manifest,
+    const std::filesystem::path& projectRoot,
+    const std::vector<std::filesystem::path>& modulePaths,
+    bool allowBuiltinFallback) {
+    const auto flags = module_policy_flags(policy);
+
+    // Explicit module-path directories rank between --load-module and project.
+    if (!modulePaths.empty()) {
+        append_module_path_providers(providers, modulePaths);
+    }
+    if (flags.project && manifest) {
+        append_project_module_providers(providers, *manifest);
+    }
+    if (flags.execAdjacent) {
+        append_build_tree_module_providers(providers);
+    }
+    if (flags.execAdjacent || flags.compiledPrefix) {
+        append_install_prefix_module_providers(providers, flags.compiledPrefix);
+    }
+    if (flags.project || flags.userSystem) {
+        append_installed_module_providers(
+            providers, projectRoot, flags.project, flags.userSystem);
+    }
+    if (flags.builtin && allowBuiltinFallback) {
+        if (auto ok = append_builtin_module_providers(providers); !ok) {
+            return ok.error();
+        }
+    }
+    return {};
+}
 
 enum class StackTraceMode {
     Auto,
@@ -75,6 +211,9 @@ struct RunCommand {
     std::vector<std::string> optionalModules;
     std::vector<wl2::DynamicModuleSpec> dynamicModules;
     StackTraceMode stackTraces = StackTraceMode::Auto;
+    ModulePolicy modulePolicy = ModulePolicy::Default;
+    std::vector<std::filesystem::path> modulePaths;  ///< --module-path / WL2_MODULE_PATH dirs.
+    std::optional<bool> allowBuiltinFallback;       ///< --(no-)allow-builtin-module-fallback.
     bool traceResources = false;
     bool allowModuleShadow = false;
     bool watch = false;
@@ -102,6 +241,29 @@ struct RunCommand {
 // how the runner was invoked.
 std::vector<std::string> g_processArgv;
 
+void append_direct_script_native_imports(
+    const std::filesystem::path& script,
+    std::vector<std::string>& requiredModules) {
+    if (script.empty() || script.string().rfind("wl2:/", 0) == 0 || script.string().rfind("file:", 0) == 0) {
+        return;
+    }
+    std::ifstream in(script, std::ios::binary);
+    if (!in) {
+        return;
+    }
+    std::ostringstream buffer;
+    buffer << in.rdbuf();
+    const std::string source = buffer.str();
+    static const std::regex importPattern(
+        R"((?:import\s*\(\s*|import\s+(?:[^'"]+\s+from\s*)?|export\s+[^'"]+\s+from\s*)['"](wl2:[A-Za-z0-9_.:/-]+)['"])");
+    for (std::sregex_iterator it(source.begin(), source.end(), importPattern), end; it != end; ++it) {
+        const std::string name = (*it)[1].str();
+        if (std::find(requiredModules.begin(), requiredModules.end(), name) == requiredModules.end()) {
+            requiredModules.push_back(name);
+        }
+    }
+}
+
 struct ResourceCommand {
     std::string action;
     std::string path = "wl2:/";
@@ -121,14 +283,14 @@ struct TestCommand {
 void usage(std::ostream& out = std::cerr) {
     out
         << "usage:\n"
-        << "  wl2 run [--manifest wl2.yml] [--watch] [--stack-traces=auto|on|off] [--map-resource host:wl2:/prefix] [--trace-resources] [--load-module path] [--allow-module-shadow] [--allow ui,graphics,shared-memory[:prefix],filesystem-read[:root]] [--allow-network] [--network-allow host[:port]] [--allow-listen] [--listen-allow host[:port]] [--allow-ui] [--allow-graphics] [--allow-shared-memory] [--shared-memory-allow prefix] [--allow-filesystem-reads] [--filesystem-read-root root] [--allow-declared] [--trust-declared] [--no-permission-prompt] [--crash-report=off|auto|<path>] [--crash-report-dir dir] [script] [-- script-args...]\n"
-        << "  wl2 config [--manifest wl2.yml] [--json] [--map-resource host:wl2:/prefix] [--load-module path]\n"
+        << "  wl2 run [--manifest wl2.yml] [--watch] [--stack-traces=auto|on|off] [--map-resource host:wl2:/prefix] [--trace-resources] [--load-module path] [--module-path dir] [--module-policy default|isolated|project-only|installed-only|system] [--allow-module-shadow] [--allow-builtin-module-fallback] [--no-builtin-module-fallback] [--allow ui,graphics,shared-memory[:prefix],filesystem-read[:root]] [--allow-network] [--network-allow host[:port]] [--allow-listen] [--listen-allow host[:port]] [--allow-ui] [--allow-graphics] [--allow-shared-memory] [--shared-memory-allow prefix] [--allow-filesystem-reads] [--filesystem-read-root root] [--allow-declared] [--trust-declared] [--no-permission-prompt] [--crash-report=off|auto|<path>] [--crash-report-dir dir] [script] [-- script-args...]\n"
+        << "  wl2 config [--manifest wl2.yml] [--json] [--map-resource host:wl2:/prefix] [--load-module path] [--module-path dir] [--module-policy default|isolated|project-only|installed-only|system]\n"
         << "  wl2 resources <list|read|extract> [--manifest wl2.yml] [--map-resource host:wl2:/prefix] [executable] [path] [--out dir] [--raw]\n"
         << "  wl2 module validate <library-path>\n"
         << "  wl2 module install <library-path> --scope local|user|system\n"
         << "  wl2 module uninstall <name> [--scope local|user|system] [--force] [--purge-cache]\n"
         << "  wl2 module list [--scope all|local|user|system]\n"
-        << "  wl2 module graph --manifest wl2.yml [--json] [--load-module path]\n"
+        << "  wl2 module graph --manifest wl2.yml [--json] [--load-module path] [--module-path dir] [--module-policy default|isolated|project-only|installed-only|system]\n"
         << "  wl2 module new <name>\n"
         << "  wl2 app install <repo[#ref][:path]> --scope local|user|system\n"
         << "  wl2 app list [--scope all|local|user|system]\n"
@@ -1409,6 +1571,8 @@ bool apply_manifest(
 
 std::optional<RunCommand> parse_run_command(int argc, char** argv, int start, bool legacy) {
     RunCommand command;
+    // WL2_MODULE_PATH seeds the explicit module-path list; --module-path appends.
+    command.modulePaths = read_env_module_paths();
     bool scriptArgs = false;
     for (int i = start; i < argc; ++i) {
         std::string arg(argv[i]);
@@ -1582,6 +1746,49 @@ std::optional<RunCommand> parse_run_command(int argc, char** argv, int start, bo
                 wl2::DynamicModuleSpec{std::string(arg.substr(loadModulePrefix.size())), false});
             continue;
         }
+        if (arg == "--module-path") {
+            if (++i >= argc) {
+                std::cerr << "--module-path requires a directory\n";
+                return std::nullopt;
+            }
+            command.modulePaths.emplace_back(argv[i]);
+            continue;
+        }
+        constexpr std::string_view modulePathPrefix = "--module-path=";
+        if (arg.rfind(modulePathPrefix, 0) == 0) {
+            command.modulePaths.emplace_back(arg.substr(modulePathPrefix.size()));
+            continue;
+        }
+        if (arg == "--allow-builtin-module-fallback") {
+            command.allowBuiltinFallback = true;
+            continue;
+        }
+        if (arg == "--no-builtin-module-fallback") {
+            command.allowBuiltinFallback = false;
+            continue;
+        }
+        if (arg == "--module-policy") {
+            if (++i >= argc) {
+                std::cerr << "--module-policy requires default, isolated, project-only, installed-only, or system\n";
+                return std::nullopt;
+            }
+            if (auto policy = parse_module_policy(argv[i])) {
+                command.modulePolicy = *policy;
+                continue;
+            }
+            std::cerr << "invalid --module-policy value: " << argv[i] << '\n';
+            return std::nullopt;
+        }
+        constexpr std::string_view modulePolicyPrefix = "--module-policy=";
+        if (arg.rfind(modulePolicyPrefix, 0) == 0) {
+            if (auto policy = parse_module_policy(arg.substr(modulePolicyPrefix.size()))) {
+                command.modulePolicy = *policy;
+                continue;
+            }
+            std::cerr << "invalid --module-policy value: "
+                      << arg.substr(modulePolicyPrefix.size()) << '\n';
+            return std::nullopt;
+        }
         if (arg == "--manifest") {
             if (++i >= argc) {
                 std::cerr << "--manifest requires a path\n";
@@ -1641,6 +1848,9 @@ std::optional<RunCommand> parse_run_command(int argc, char** argv, int start, bo
         projectRoot = manifest.baseDir;
         hasManifest = true;
     }
+    if (!hasManifest) {
+        append_direct_script_native_imports(command.script, command.requiredModules);
+    }
     // Explicit --load-module overrides honor the global shadow flag.
     for (auto& spec : command.dynamicModules) {
         spec.allowShadow = command.allowModuleShadow;
@@ -1670,11 +1880,15 @@ std::optional<RunCommand> parse_run_command(int argc, char** argv, int start, bo
             std::cerr << "error: " << ok.error().message() << '\n';
             return std::nullopt;
         }
-        if (hasManifest) {
-            append_project_module_providers(request.providers, manifest);
-        }
-        append_installed_module_providers(request.providers, projectRoot);
-        if (auto ok = append_builtin_module_providers(request.providers); !ok) {
+        const bool builtinFallback = effective_builtin_fallback(command.allowBuiltinFallback);
+        if (auto ok = append_module_providers(
+                request.providers,
+                command.modulePolicy,
+                hasManifest ? &manifest : nullptr,
+                projectRoot,
+                command.modulePaths,
+                builtinFallback);
+            !ok) {
             providersOk = false;
         }
 
@@ -1684,16 +1898,39 @@ std::optional<RunCommand> parse_run_command(int argc, char** argv, int start, bo
             if (auto plan = wl2::resolveModuleGraph(request)) {
                 // Project source dependencies load from their installed local
                 // library once built; resolve them through the local scope.
+                wl2::ModuleStore buildStore(build_tree_module_scope_paths());
                 wl2::ModuleStore store(wl2::resolveModuleScopePaths(projectRoot));
                 auto queueLibrary = [&](const std::filesystem::path& path) {
                     if (!path.empty() && queued.insert(path).second) {
                         command.dynamicModules.push_back(wl2::DynamicModuleSpec{path, true});
                     }
                 };
-                const auto installedRecords = store.list();
-                // Report a verification failure, returning false (abort) only for a
-                // required module; an optional one is skipped with a diagnostic.
+                std::vector<wl2::InstalledModuleRecord> installedRecords =
+                    buildStore.scanScope(wl2::ModuleScope::Local);
+                auto prefixRecords = install_prefix_module_records(true);
+                installedRecords.insert(
+                    installedRecords.end(),
+                    prefixRecords.begin(),
+                    prefixRecords.end());
+                auto modulePathRecords = module_path_module_records(command.modulePaths);
+                installedRecords.insert(
+                    installedRecords.end(),
+                    modulePathRecords.begin(),
+                    modulePathRecords.end());
+                auto scopedRecords = store.list();
+                installedRecords.insert(
+                    installedRecords.end(),
+                    scopedRecords.begin(),
+                    scopedRecords.end());
+                // Report a verification failure. A missing checksum is a warning
+                // and the module still loads; a mismatched/missing library aborts
+                // for a required module and is skipped for an optional one.
                 auto reportVerifyFailure = [](const wl2::Error& error, bool optional) -> bool {
+                    if (error.code() == "module_checksum_missing") {
+                        std::cerr << "warning: " << error.message()
+                                  << "; continuing without checksum verification\n";
+                        return true;
+                    }
                     if (optional) {
                         std::cerr << "warning: " << error.message()
                                   << "; skipping optional module\n";
@@ -1723,7 +1960,9 @@ std::optional<RunCommand> parse_run_command(int argc, char** argv, int start, bo
                 for (const auto& resolved : plan.value().loadOrder) {
                     const auto& provider = resolved.provider;
                     switch (provider.source) {
+                        case wl2::ModuleProvider::Source::ModulePath:
                         case wl2::ModuleProvider::Source::Local:
+                        case wl2::ModuleProvider::Source::Install:
                         case wl2::ModuleProvider::Source::User:
                         case wl2::ModuleProvider::Source::System:
                             if (!verifySelectedLibrary(provider.path, resolved.optional)) {
@@ -1756,16 +1995,79 @@ std::optional<RunCommand> parse_run_command(int argc, char** argv, int start, bo
             // runtime still loads what is present and reports module_required_missing
             // for genuinely missing required modules.
             wl2::ModuleStore store(wl2::resolveModuleScopePaths(projectRoot));
+            wl2::ModuleStore buildStore(build_tree_module_scope_paths());
+            // The fallback honors the same search policy as graph resolution,
+            // via the shared predicate used by append_module_providers.
+            const auto flags = module_policy_flags(command.modulePolicy);
+            // Explicit module-path directories rank between --load-module and
+            // build/install scopes, so they are consulted first.
+            auto resolveModulePathName = [&](const std::string& name)
+                -> std::optional<wl2::InstalledModuleRecord> {
+                for (auto& record : module_path_module_records(command.modulePaths)) {
+                    if (record.name == name) {
+                        return record;
+                    }
+                }
+                return std::nullopt;
+            };
+            auto resolveBuildName = [&](const std::string& name) -> std::optional<wl2::InstalledModuleRecord> {
+                if (flags.execAdjacent && build_tree_store_is_executable_adjacent()) {
+                    for (auto& record : buildStore.scanScope(wl2::ModuleScope::Local)) {
+                        if (record.name == name) {
+                            return record;
+                        }
+                    }
+                }
+                if (flags.execAdjacent || flags.compiledPrefix) {
+                    for (auto& record : install_prefix_module_records(flags.compiledPrefix)) {
+                        if (record.name == name) {
+                            return record;
+                        }
+                    }
+                }
+                return std::nullopt;
+            };
+            // First matching record in resolution order (local, user, system)
+            // whose scope the policy admits. The shadowed flag is not used here
+            // because a policy-excluded scope must not shadow an admitted one.
+            auto resolveScopedName = [&](const std::string& name) -> std::optional<wl2::InstalledModuleRecord> {
+                for (auto& record : store.list()) {
+                    if (record.name != name) {
+                        continue;
+                    }
+                    if (record.scope == wl2::ModuleScope::Local && !flags.project) {
+                        continue;
+                    }
+                    if ((record.scope == wl2::ModuleScope::User
+                            || record.scope == wl2::ModuleScope::System)
+                        && !flags.userSystem) {
+                        continue;
+                    }
+                    return record;
+                }
+                return std::nullopt;
+            };
             auto resolveName = [&](const std::string& name, bool optional) -> bool {
-                if (auto record = store.resolve(name)) {
+                std::optional<wl2::InstalledModuleRecord> record = resolveModulePathName(name);
+                if (!record) {
+                    record = resolveBuildName(name);
+                }
+                if (!record) {
+                    record = resolveScopedName(name);
+                }
+                if (record) {
                     if (auto ok = store.verifyInstalled(*record); !ok) {
-                        if (optional) {
+                        if (ok.error().code() == "module_checksum_missing") {
+                            std::cerr << "warning: " << ok.error().message()
+                                      << "; continuing without checksum verification\n";
+                        } else if (optional) {
                             std::cerr << "warning: " << ok.error().message()
                                       << "; skipping optional module\n";
                             return true;
+                        } else {
+                            std::cerr << "error: " << ok.error().message() << '\n';
+                            return false;
                         }
-                        std::cerr << "error: " << ok.error().message() << '\n';
-                        return false;
                     }
                     if (queued.insert(record->libraryPath).second) {
                         command.dynamicModules.push_back(
@@ -2354,11 +2656,14 @@ struct ConfigCommand {
     std::vector<wl2::ResourceDirectoryMount> maps;
     std::optional<wl2::ResourceManifest> manifest;
     std::vector<std::filesystem::path> dynamicModulePaths;
+    std::vector<std::filesystem::path> modulePaths;
+    ModulePolicy modulePolicy = ModulePolicy::Default;
     bool json = false;
 };
 
 std::optional<ConfigCommand> parse_config_command(int argc, char** argv, int start) {
     ConfigCommand command;
+    command.modulePaths = read_env_module_paths();
     std::vector<wl2::ResourceDirectoryMount> maps;
     for (int i = start; i < argc; ++i) {
         std::string arg(argv[i]);
@@ -2405,6 +2710,41 @@ std::optional<ConfigCommand> parse_config_command(int argc, char** argv, int sta
             command.dynamicModulePaths.emplace_back(arg.substr(loadModulePrefix.size()));
             continue;
         }
+        if (arg == "--module-path") {
+            if (++i >= argc) {
+                std::cerr << "--module-path requires a directory\n";
+                return std::nullopt;
+            }
+            command.modulePaths.emplace_back(argv[i]);
+            continue;
+        }
+        constexpr std::string_view modulePathPrefix = "--module-path=";
+        if (arg.rfind(modulePathPrefix, 0) == 0) {
+            command.modulePaths.emplace_back(arg.substr(modulePathPrefix.size()));
+            continue;
+        }
+        if (arg == "--module-policy") {
+            if (++i >= argc) {
+                std::cerr << "--module-policy requires default, isolated, project-only, installed-only, or system\n";
+                return std::nullopt;
+            }
+            if (auto policy = parse_module_policy(argv[i])) {
+                command.modulePolicy = *policy;
+                continue;
+            }
+            std::cerr << "invalid --module-policy value: " << argv[i] << '\n';
+            return std::nullopt;
+        }
+        constexpr std::string_view modulePolicyPrefix = "--module-policy=";
+        if (arg.rfind(modulePolicyPrefix, 0) == 0) {
+            if (auto policy = parse_module_policy(arg.substr(modulePolicyPrefix.size()))) {
+                command.modulePolicy = *policy;
+                continue;
+            }
+            std::cerr << "invalid --module-policy value: "
+                      << arg.substr(modulePolicyPrefix.size()) << '\n';
+            return std::nullopt;
+        }
         std::cerr << "unknown config option: " << arg << '\n';
         return std::nullopt;
     }
@@ -2442,7 +2782,9 @@ std::vector<wl2::DependencyStatus> config_dependency_status(const ConfigCommand&
 wl2::ModuleResolutionRequest build_config_resolution_request(
     const std::optional<wl2::ResourceManifest>& manifest,
     const std::vector<std::filesystem::path>& explicitPaths,
-    const std::filesystem::path& projectRoot) {
+    const std::filesystem::path& projectRoot,
+    ModulePolicy policy,
+    const std::vector<std::filesystem::path>& modulePaths) {
     wl2::ModuleResolutionRequest request;
     if (manifest) {
         for (const auto& name : manifest->requiredModules) {
@@ -2453,11 +2795,9 @@ wl2::ModuleResolutionRequest build_config_resolution_request(
         }
     }
     (void)append_explicit_module_providers(request.providers, explicitPaths);
-    if (manifest) {
-        append_project_module_providers(request.providers, *manifest);
-    }
-    append_installed_module_providers(request.providers, projectRoot);
-    (void)append_builtin_module_providers(request.providers);
+    (void)append_module_providers(
+        request.providers, policy, manifest ? &*manifest : nullptr, projectRoot,
+        modulePaths, effective_builtin_fallback(std::nullopt));
     return request;
 }
 
@@ -2469,8 +2809,9 @@ int config_json_command(const ConfigCommand& command, const wl2::ResourceStore& 
 
     // Resolve the module graph so config can report the selected provider order,
     // shadowing, and stable dependency diagnostics.
-    const auto graphRequest =
-        build_config_resolution_request(command.manifest, command.dynamicModulePaths, projectRoot);
+    const auto graphRequest = build_config_resolution_request(
+        command.manifest, command.dynamicModulePaths, projectRoot,
+        command.modulePolicy, command.modulePaths);
     const auto graphPlan = wl2::resolveModuleGraph(graphRequest);
 
     using ojson = nlohmann::ordered_json;
@@ -2504,6 +2845,11 @@ int config_json_command(const ConfigCommand& command, const wl2::ResourceStore& 
         });
     }
     modules["installed"] = std::move(installedArray);
+    ojson modulePathArray = ojson::array();
+    for (const auto& dir : command.modulePaths) {
+        modulePathArray.push_back(dir.string());
+    }
+    modules["modulePaths"] = std::move(modulePathArray);
     root["modules"] = std::move(modules);
 
     ojson selected = ojson::array();
@@ -2630,11 +2976,21 @@ int config_command(const ConfigCommand& command) {
                       << ", version " << info.value().version << ")\n";
         }
     }
+    if (!command.modulePaths.empty()) {
+        std::cout << "module paths:\n";
+        for (const auto& dir : command.modulePaths) {
+            std::cout << "  " << dir.string() << '\n';
+        }
+    }
 
     // Installed modules across scopes, reporting any that are shadowed by a
     // higher-priority scope.
     std::filesystem::path projectRoot = config_project_root(command);
-    wl2::ModuleStore moduleStore(wl2::resolveModuleScopePaths(projectRoot));
+    const auto configScopePaths = wl2::resolveModuleScopePaths(projectRoot);
+    warn_if_module_store_invalid(configScopePaths.local);
+    warn_if_module_store_invalid(configScopePaths.user);
+    warn_if_module_store_invalid(configScopePaths.system);
+    wl2::ModuleStore moduleStore(configScopePaths);
     auto installed = moduleStore.list();
     if (!installed.empty()) {
         std::cout << "  installed modules:\n";
@@ -3264,6 +3620,39 @@ int module_list(int argc, char** argv) {
     return 0;
 }
 
+// Warn (once per directory) when a module store directory exists and holds
+// module subdirectories but has no scope index. Every store writer (install,
+// staging) produces index.yml, so its absence means a corrupt or hand-rolled
+// store whose modules may resolve inconsistently.
+void warn_if_module_store_invalid(const std::filesystem::path& storeDir) {
+    static std::set<std::filesystem::path> warned;
+    std::error_code ec;
+    if (storeDir.empty() || !std::filesystem::is_directory(storeDir, ec)) {
+        return;
+    }
+    if (std::filesystem::is_regular_file(storeDir / "index.yml", ec)) {
+        return;
+    }
+    bool hasModuleDir = false;
+    for (const auto& entry : std::filesystem::directory_iterator(storeDir, ec)) {
+        if (ec) {
+            break;
+        }
+        if (entry.is_directory()
+            && std::filesystem::is_regular_file(entry.path() / "wl2.module.yml", ec)) {
+            hasModuleDir = true;
+            break;
+        }
+    }
+    if (!hasModuleDir) {
+        return;
+    }
+    if (warned.insert(storeDir).second) {
+        std::cerr << "warning: module_store_invalid: module store has no index.yml: "
+                  << storeDir.string() << '\n';
+    }
+}
+
 wl2::ModuleProvider::Source provider_source_for_scope(wl2::ModuleScope scope) {
     switch (scope) {
         case wl2::ModuleScope::Local: return wl2::ModuleProvider::Source::Local;
@@ -3273,11 +3662,89 @@ wl2::ModuleProvider::Source provider_source_for_scope(wl2::ModuleScope scope) {
     return wl2::ModuleProvider::Source::Local;
 }
 
+wl2::ModuleScopePaths build_tree_module_scope_paths() {
+    wl2::ModuleScopePaths paths;
+#ifdef WL2_BUILD_TREE_MODULE_DIR
+    paths.local = WL2_BUILD_TREE_MODULE_DIR;
+#else
+    paths.local = {};
+#endif
+    return paths;
+}
+
+// True when the compiled build-tree module store is adjacent to the running
+// executable, i.e. this process is the build-tree runner. An installed or
+// relocated wl2 also carries the compiled absolute build path, but must never
+// load modules from that stale directory: it would shadow the installed store
+// and is an arbitrary-code-loading hazard on shared machines.
+bool build_tree_store_is_executable_adjacent() {
+    const auto paths = build_tree_module_scope_paths();
+    if (paths.local.empty()) {
+        return false;
+    }
+    const auto exe = current_executable_path();
+    if (exe.empty() || !exe.has_parent_path()) {
+        return false;
+    }
+    std::error_code ec;
+    auto store = std::filesystem::weakly_canonical(paths.local, ec);
+    if (ec) {
+        store = paths.local;
+    }
+    auto adjacent = std::filesystem::weakly_canonical(
+        exe.parent_path().parent_path() / "lib" / "wl2" / "modules", ec);
+    if (ec) {
+        return false;
+    }
+    return store == adjacent;
+}
+
+void append_build_tree_module_providers(std::vector<wl2::ModuleProvider>& providers) {
+    const auto paths = build_tree_module_scope_paths();
+    if (paths.local.empty() || !build_tree_store_is_executable_adjacent()) {
+        return;
+    }
+    warn_if_module_store_invalid(paths.local);
+    wl2::ModuleStore store(paths);
+    for (const auto& record : store.scanScope(wl2::ModuleScope::Local)) {
+        wl2::ModuleInfo info;
+        info.name = record.name;
+        info.version = record.version;
+        info.build = record.build;
+        info.abiVersion = record.abiVersion;
+        info.stableId = record.stableId;
+        info.libraryPath = record.libraryPath;
+        info.dependencies = record.dependencies;
+        providers.push_back(wl2::ModuleProvider{
+            .info = std::move(info),
+            .source = wl2::ModuleProvider::Source::Local,
+            .path = record.libraryPath,
+        });
+    }
+}
+
 void append_installed_module_providers(
     std::vector<wl2::ModuleProvider>& providers,
-    const std::filesystem::path& projectRoot) {
-    wl2::ModuleStore store(wl2::resolveModuleScopePaths(projectRoot));
+    const std::filesystem::path& projectRoot,
+    bool includeLocalScope,
+    bool includeUserSystemScopes) {
+    const auto scopePaths = wl2::resolveModuleScopePaths(projectRoot);
+    if (includeLocalScope) {
+        warn_if_module_store_invalid(scopePaths.local);
+    }
+    if (includeUserSystemScopes) {
+        warn_if_module_store_invalid(scopePaths.user);
+        warn_if_module_store_invalid(scopePaths.system);
+    }
+    wl2::ModuleStore store(scopePaths);
     for (const auto& record : store.list()) {
+        if (record.scope == wl2::ModuleScope::Local && !includeLocalScope) {
+            continue;
+        }
+        if ((record.scope == wl2::ModuleScope::User || record.scope == wl2::ModuleScope::System)
+            && !includeUserSystemScopes) {
+            continue;
+        }
         wl2::ModuleInfo info;
         info.name = record.name;
         info.version = record.version;
@@ -3292,6 +3759,211 @@ void append_installed_module_providers(
             .path = record.libraryPath,
         });
     }
+}
+
+// Absolute path of the running wl2 executable, for executable-adjacent module
+// store discovery. Falls back to argv[0] when the platform lookup fails.
+std::filesystem::path current_executable_path() {
+#if defined(__linux__)
+    {
+        std::error_code ec;
+        auto exe = std::filesystem::read_symlink("/proc/self/exe", ec);
+        if (!ec && !exe.empty()) {
+            return exe;
+        }
+    }
+#endif
+    if (!g_processArgv.empty()) {
+        std::error_code ec;
+        auto resolved = std::filesystem::weakly_canonical(
+            std::filesystem::path(g_processArgv.front()), ec);
+        if (!ec && !resolved.empty()) {
+            return resolved;
+        }
+        return std::filesystem::path(g_processArgv.front());
+    }
+    return {};
+}
+
+// Installed module store directories, in resolution order:
+//   1. executable-adjacent: dirname(realpath(argv[0]))/../<libdir>/wl2/modules,
+//      which makes staged installs, relocatable tarballs, and app bundles work;
+//   2. the compiled install prefix ${CMAKE_INSTALL_FULL_LIBDIR}/wl2/modules,
+//      which catches traditional non-relocatable installs.
+// Paths are canonicalized and deduplicated; the build-tree store is excluded
+// because append_build_tree_module_providers() already covers it.
+std::vector<std::filesystem::path> install_prefix_module_dirs(bool includeCompiledPrefix) {
+    std::vector<std::filesystem::path> candidates;
+    const auto exe = current_executable_path();
+    if (!exe.empty() && exe.has_parent_path()) {
+        const auto prefixRoot = exe.parent_path().parent_path();
+        candidates.push_back(prefixRoot / "lib" / "wl2" / "modules");
+#ifdef WL2_INSTALL_LIBDIR
+        candidates.push_back(prefixRoot / WL2_INSTALL_LIBDIR / "wl2" / "modules");
+#endif
+    }
+#ifdef WL2_INSTALLED_MODULE_DIR
+    if (includeCompiledPrefix) {
+        candidates.emplace_back(WL2_INSTALLED_MODULE_DIR);
+    }
+#else
+    (void)includeCompiledPrefix;
+#endif
+
+    std::filesystem::path buildTreeDir;
+#ifdef WL2_BUILD_TREE_MODULE_DIR
+    {
+        std::error_code ec;
+        buildTreeDir = std::filesystem::weakly_canonical(
+            std::filesystem::path(WL2_BUILD_TREE_MODULE_DIR), ec);
+        if (ec) {
+            buildTreeDir = WL2_BUILD_TREE_MODULE_DIR;
+        }
+    }
+#endif
+
+    std::vector<std::filesystem::path> dirs;
+    for (const auto& candidate : candidates) {
+        std::error_code ec;
+        auto canonical = std::filesystem::weakly_canonical(candidate, ec);
+        if (ec) {
+            canonical = candidate;
+        }
+        if (!std::filesystem::is_directory(canonical, ec)) {
+            continue;
+        }
+        if (!buildTreeDir.empty() && canonical == buildTreeDir) {
+            continue;
+        }
+        if (std::find(dirs.begin(), dirs.end(), canonical) == dirs.end()) {
+            dirs.push_back(canonical);
+        }
+    }
+    return dirs;
+}
+
+// Installed-store records from every install-prefix module directory, used both
+// for provider assembly and for checksum verification before load.
+std::vector<wl2::InstalledModuleRecord> install_prefix_module_records(bool includeCompiledPrefix) {
+    std::vector<wl2::InstalledModuleRecord> records;
+    for (const auto& dir : install_prefix_module_dirs(includeCompiledPrefix)) {
+        warn_if_module_store_invalid(dir);
+        wl2::ModuleScopePaths paths;
+        paths.local = dir;
+        wl2::ModuleStore store(paths);
+        for (auto& record : store.scanScope(wl2::ModuleScope::Local)) {
+            records.push_back(std::move(record));
+        }
+    }
+    return records;
+}
+
+void append_install_prefix_module_providers(
+    std::vector<wl2::ModuleProvider>& providers,
+    bool includeCompiledPrefix) {
+    for (const auto& record : install_prefix_module_records(includeCompiledPrefix)) {
+        wl2::ModuleInfo info;
+        info.name = record.name;
+        info.version = record.version;
+        info.build = record.build;
+        info.abiVersion = record.abiVersion;
+        info.stableId = record.stableId;
+        info.libraryPath = record.libraryPath;
+        info.dependencies = record.dependencies;
+        providers.push_back(wl2::ModuleProvider{
+            .info = std::move(info),
+            .source = wl2::ModuleProvider::Source::Install,
+            .path = record.libraryPath,
+        });
+    }
+}
+
+// Canonicalize and deduplicate module-path directories. Module paths are an
+// explicit opt-in, so every path is canonicalized before loading to avoid the
+// same directory participating twice under different spellings.
+std::vector<std::filesystem::path> canonicalize_module_path_dirs(
+    const std::vector<std::filesystem::path>& dirs) {
+    std::vector<std::filesystem::path> result;
+    for (const auto& dir : dirs) {
+        if (dir.empty()) {
+            continue;
+        }
+        std::error_code ec;
+        auto canonical = std::filesystem::weakly_canonical(dir, ec);
+        if (ec) {
+            canonical = dir;
+        }
+        if (std::find(result.begin(), result.end(), canonical) == result.end()) {
+            result.push_back(std::move(canonical));
+        }
+    }
+    return result;
+}
+
+// Explicit module-path store records (`--module-path` / WL2_MODULE_PATH), used
+// for provider assembly and for checksum verification before load.
+std::vector<wl2::InstalledModuleRecord> module_path_module_records(
+    const std::vector<std::filesystem::path>& dirs) {
+    std::vector<wl2::InstalledModuleRecord> records;
+    for (const auto& dir : canonicalize_module_path_dirs(dirs)) {
+        warn_if_module_store_invalid(dir);
+        wl2::ModuleScopePaths paths;
+        paths.local = dir;
+        wl2::ModuleStore store(paths);
+        for (auto& record : store.scanScope(wl2::ModuleScope::Local)) {
+            records.push_back(std::move(record));
+        }
+    }
+    return records;
+}
+
+void append_module_path_providers(
+    std::vector<wl2::ModuleProvider>& providers,
+    const std::vector<std::filesystem::path>& dirs) {
+    for (const auto& record : module_path_module_records(dirs)) {
+        wl2::ModuleInfo info;
+        info.name = record.name;
+        info.version = record.version;
+        info.build = record.build;
+        info.abiVersion = record.abiVersion;
+        info.stableId = record.stableId;
+        info.libraryPath = record.libraryPath;
+        info.dependencies = record.dependencies;
+        providers.push_back(wl2::ModuleProvider{
+            .info = std::move(info),
+            .source = wl2::ModuleProvider::Source::ModulePath,
+            .path = record.libraryPath,
+        });
+    }
+}
+
+// Read WL2_MODULE_PATH and split it into module-path directories. The separator
+// is `:` on POSIX and `;` on Windows, matching platform path-list conventions.
+std::vector<std::filesystem::path> read_env_module_paths() {
+    const char* raw = std::getenv("WL2_MODULE_PATH");
+    if (raw == nullptr || raw[0] == '\0') {
+        return {};
+    }
+#if defined(_WIN32)
+    constexpr char sep = ';';
+#else
+    constexpr char sep = ':';
+#endif
+    std::vector<std::filesystem::path> dirs;
+    std::string text(raw);
+    size_t start = 0;
+    while (start <= text.size()) {
+        const size_t end = text.find(sep, start);
+        const std::string token = text.substr(start, end == std::string::npos ? std::string::npos : end - start);
+        if (!token.empty()) {
+            dirs.emplace_back(token);
+        }
+        if (end == std::string::npos) {
+            break;
+        }
+        start = end + 1;
+    }
+    return dirs;
 }
 
 wl2::Result<void> append_builtin_module_providers(std::vector<wl2::ModuleProvider>& providers) {
@@ -3432,6 +4104,8 @@ void print_module_graph_text(const wl2::ModuleResolutionPlan& plan) {
 int module_graph(int argc, char** argv) {
     std::filesystem::path manifestPath = "wl2.yml";
     std::vector<std::filesystem::path> explicitModules;
+    std::vector<std::filesystem::path> modulePaths = read_env_module_paths();
+    ModulePolicy modulePolicy = ModulePolicy::Default;
     bool json = false;
     for (int i = 3; i < argc; ++i) {
         std::string arg(argv[i]);
@@ -3447,6 +4121,33 @@ int module_graph(int argc, char** argv) {
                 return 2;
             }
             explicitModules.emplace_back(argv[i]);
+        } else if (arg == "--module-path") {
+            if (++i >= argc) {
+                std::cerr << "--module-path requires a directory\n";
+                return 2;
+            }
+            modulePaths.emplace_back(argv[i]);
+        } else if (arg.rfind("--module-path=", 0) == 0) {
+            modulePaths.emplace_back(arg.substr(std::string_view("--module-path=").size()));
+        } else if (arg == "--module-policy") {
+            if (++i >= argc) {
+                std::cerr << "--module-policy requires default, isolated, project-only, installed-only, or system\n";
+                return 2;
+            }
+            if (auto policy = parse_module_policy(argv[i])) {
+                modulePolicy = *policy;
+            } else {
+                std::cerr << "invalid --module-policy value: " << argv[i] << '\n';
+                return 2;
+            }
+        } else if (arg.rfind("--module-policy=", 0) == 0) {
+            const std::string value = arg.substr(std::string_view("--module-policy=").size());
+            if (auto policy = parse_module_policy(value)) {
+                modulePolicy = *policy;
+            } else {
+                std::cerr << "invalid --module-policy value: " << value << '\n';
+                return 2;
+            }
         } else if (arg == "--json") {
             json = true;
         } else {
@@ -3473,9 +4174,10 @@ int module_graph(int argc, char** argv) {
         print_error(ok.error(), StackTraceMode::Auto);
         return 1;
     }
-    append_project_module_providers(request.providers, manifest.value());
-    append_installed_module_providers(request.providers, manifest.value().baseDir);
-    if (auto ok = append_builtin_module_providers(request.providers); !ok) {
+    if (auto ok = append_module_providers(
+            request.providers, modulePolicy, &manifest.value(), manifest.value().baseDir,
+            modulePaths, effective_builtin_fallback(std::nullopt));
+        !ok) {
         print_error(ok.error(), StackTraceMode::Auto);
         return 1;
     }
@@ -4260,6 +4962,12 @@ int main(int argc, char** argv) {
         if (!run) {
             return 2;
         }
+        // Keep the resolver and the runtime's static registry in sync: when
+        // dynamic→static fallback is off, drop built-in static modules so a
+        // missing dynamic module genuinely fails instead of falling back.
+        if (!effective_builtin_fallback(run->allowBuiltinFallback)) {
+            options.staticModules.clear();
+        }
         if (run->watch) {
             return watch_run(std::move(options), *run);
         }
@@ -4270,6 +4978,9 @@ int main(int argc, char** argv) {
     auto run = parse_run_command(argc, argv, 1, true);
     if (!run) {
         return 2;
+    }
+    if (!effective_builtin_fallback(run->allowBuiltinFallback)) {
+        options.staticModules.clear();
     }
     if (run->watch) {
         return watch_run(std::move(options), *run);

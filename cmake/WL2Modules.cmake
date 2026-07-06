@@ -52,6 +52,9 @@ define_property(GLOBAL PROPERTY WL2_MODULE_REGISTRY_REQUIRES
 define_property(GLOBAL PROPERTY WL2_MODULE_REGISTRY_OPTIONAL
     BRIEF_DOCS "Winglib2 module registry optional module dependencies"
     FULL_DOCS "Optional dependency names (pipe-joined) recorded by wl2_add_module().")
+define_property(GLOBAL PROPERTY WL2_MODULE_REGISTRY_BUNDLED_LIBRARIES
+    BRIEF_DOCS "Winglib2 module registry module-owned shared dependency payloads"
+    FULL_DOCS "Per-module shared library files (pipe-joined paths or generator expressions) staged into the module's deps/ directory, recorded by wl2_add_module().")
 define_property(GLOBAL PROPERTY WL2_PACKAGE_BUNDLE_LIBRARIES
     BRIEF_DOCS "Winglib2 module-owned dependency libraries to bundle"
     FULL_DOCS "Encoded module-owned dependency target metadata used by package installation.")
@@ -297,7 +300,7 @@ function(wl2_add_module_tests module_name)
 endfunction()
 
 function(wl2_add_module module_name)
-    set(options NO_DYNAMIC_LINK_LIBRARIES NO_INSTALL)
+    set(options HAS_DYNAMIC_REGISTER NO_DYNAMIC_LINK_LIBRARIES NO_INSTALL)
     set(oneValueArgs
         STATIC_TARGET DYNAMIC_TARGET INCLUDE_DIR
         MODULE_NAME REGISTER_FUNCTION VERSION STABLE_ID FEATURE TEST_DIR DOCS_DIR)
@@ -306,6 +309,7 @@ function(wl2_add_module module_name)
         REQUIRES_MODULES OPTIONAL_MODULES
         PUBLIC_LINK_LIBRARIES PRIVATE_LINK_LIBRARIES
         DYNAMIC_LINK_LIBRARIES DYNAMIC_INCLUDE_DIRS
+        DYNAMIC_BUNDLED_LIBRARIES
         PUBLIC_COMPILE_DEFINITIONS PRIVATE_COMPILE_DEFINITIONS
         STATIC_PUBLIC_COMPILE_DEFINITIONS STATIC_PRIVATE_COMPILE_DEFINITIONS
         DYNAMIC_PUBLIC_COMPILE_DEFINITIONS DYNAMIC_PRIVATE_COMPILE_DEFINITIONS)
@@ -404,7 +408,45 @@ function(wl2_add_module module_name)
     endif()
 
     if(WL2_BUILD_SHARED_MODULES)
+        set(_wl2_dynamic_register_source)
+        if(NOT WL2MOD_HAS_DYNAMIC_REGISTER)
+            set(_wl2_dynamic_register_source
+                "${CMAKE_CURRENT_BINARY_DIR}/${WL2MOD_DYNAMIC_TARGET}_dynamic_register.cpp")
+            file(WRITE "${_wl2_dynamic_register_source}" [=[
+#include "wl2/module.h"
+#include "wl2/runtime.h"
+
+#if defined(__GNUC__) || defined(__clang__)
+#define WL2_DYNAMIC_REGISTER_WEAK __attribute__((weak))
+#else
+#define WL2_DYNAMIC_REGISTER_WEAK
+#endif
+
+]=])
+            file(APPEND "${_wl2_dynamic_register_source}" "WL2_DYNAMIC_REGISTER_WEAK wl2::ModuleInfo ${WL2MOD_REGISTER_FUNCTION}(wl2::Runtime& runtime);\n\n")
+            file(APPEND "${_wl2_dynamic_register_source}" [=[
+extern "C" WL2_DYNAMIC_REGISTER_WEAK int wl2_module_register(const wl2_module_host* host) {
+    if (!host || !host->host) {
+        return 1;
+    }
+    if (!]=])
+            file(APPEND "${_wl2_dynamic_register_source}" "${WL2MOD_REGISTER_FUNCTION}")
+            file(APPEND "${_wl2_dynamic_register_source}" [=[) {
+        return 1;
+    }
+    auto* runtime = static_cast<wl2::Runtime*>(host->host);
+    ]=])
+            file(APPEND "${_wl2_dynamic_register_source}" "${WL2MOD_REGISTER_FUNCTION}(*runtime);\n")
+            file(APPEND "${_wl2_dynamic_register_source}" [=[
+    return 0;
+}
+]=])
+        endif()
+
         add_library(${WL2MOD_DYNAMIC_TARGET} MODULE ${WL2MOD_SOURCES})
+        if(_wl2_dynamic_register_source)
+            target_sources(${WL2MOD_DYNAMIC_TARGET} PRIVATE "${_wl2_dynamic_register_source}")
+        endif()
         # The wl2 headers require C++20. A dynamic module does not link wl2_core
         # (the host provides those symbols), so it must request the standard
         # itself rather than inheriting it transitively.
@@ -412,7 +454,29 @@ function(wl2_add_module module_name)
         target_include_directories(${WL2MOD_DYNAMIC_TARGET}
             PUBLIC
                 $<BUILD_INTERFACE:${WL2MOD_INCLUDE_DIR}>
-                $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+                $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+            PRIVATE
+                ${PROJECT_SOURCE_DIR}/include)
+        if(TARGET wl2_core)
+            set(_wl2_core_usage_target wl2_core)
+        elseif(TARGET winglib2::wl2_core)
+            set(_wl2_core_usage_target winglib2::wl2_core)
+        else()
+            set(_wl2_core_usage_target)
+        endif()
+        if(_wl2_core_usage_target)
+            target_include_directories(${WL2MOD_DYNAMIC_TARGET}
+                PRIVATE $<TARGET_PROPERTY:${_wl2_core_usage_target},INTERFACE_INCLUDE_DIRECTORIES>)
+            target_compile_definitions(${WL2MOD_DYNAMIC_TARGET}
+                PRIVATE $<TARGET_PROPERTY:${_wl2_core_usage_target},INTERFACE_COMPILE_DEFINITIONS>)
+        endif()
+        if(WL2_JS_ENGINE STREQUAL "quickjs" AND TARGET quickjs)
+            target_include_directories(${WL2MOD_DYNAMIC_TARGET}
+                PRIVATE $<TARGET_PROPERTY:quickjs,INTERFACE_INCLUDE_DIRECTORIES>)
+        elseif(WL2_JS_ENGINE STREQUAL "v8" AND TARGET v8)
+            target_include_directories(${WL2MOD_DYNAMIC_TARGET}
+                PRIVATE $<TARGET_PROPERTY:v8,INTERFACE_INCLUDE_DIRECTORIES>)
+        endif()
         if(WL2MOD_DYNAMIC_INCLUDE_DIRS)
             target_include_directories(${WL2MOD_DYNAMIC_TARGET}
                 PRIVATE ${WL2MOD_DYNAMIC_INCLUDE_DIRS})
@@ -440,7 +504,21 @@ function(wl2_add_module module_name)
                 PUBLIC ${WL2MOD_DYNAMIC_PUBLIC_COMPILE_DEFINITIONS}
                 PRIVATE ${WL2MOD_DYNAMIC_PRIVATE_COMPILE_DEFINITIONS})
         endif()
-        list(APPEND _wl2_module_created_targets ${WL2MOD_DYNAMIC_TARGET})
+        # Module-owned shared dependencies resolve relative to the module payload
+        # ($ORIGIN / @loader_path) or its adjacent deps/ directory, never through
+        # LD_LIBRARY_PATH. The staged/installed store copies the built payload
+        # verbatim, so the loader path is written at build time.
+        if(APPLE)
+            set_property(TARGET ${WL2MOD_DYNAMIC_TARGET} APPEND
+                PROPERTY BUILD_RPATH "@loader_path" "@loader_path/deps")
+            set_property(TARGET ${WL2MOD_DYNAMIC_TARGET} APPEND
+                PROPERTY INSTALL_RPATH "@loader_path" "@loader_path/deps")
+        elseif(UNIX)
+            set_property(TARGET ${WL2MOD_DYNAMIC_TARGET} APPEND
+                PROPERTY BUILD_RPATH "$ORIGIN" "$ORIGIN/deps")
+            set_property(TARGET ${WL2MOD_DYNAMIC_TARGET} APPEND
+                PROPERTY INSTALL_RPATH "$ORIGIN" "$ORIGIN/deps")
+        endif()
     endif()
 
     # NO_INSTALL keeps a module out of the Winglib2 package. Example modules such
@@ -453,26 +531,31 @@ function(wl2_add_module module_name)
         if(EXISTS "${WL2MOD_INCLUDE_DIR}")
             set_property(GLOBAL APPEND PROPERTY WL2_MODULE_HEADER_DIRS "${WL2MOD_INCLUDE_DIR}")
         endif()
-        set_property(GLOBAL APPEND PROPERTY WL2_MODULE_REGISTRY_MODULE_NAMES "${WL2MOD_MODULE_NAME}")
-        set_property(GLOBAL APPEND PROPERTY WL2_MODULE_REGISTRY_STATIC_TARGETS "${WL2MOD_STATIC_TARGET}")
-        set_property(GLOBAL APPEND PROPERTY WL2_MODULE_REGISTRY_DYNAMIC_TARGETS "${WL2MOD_DYNAMIC_TARGET}")
-        set_property(GLOBAL APPEND PROPERTY WL2_MODULE_REGISTRY_REGISTRATION_FUNCTIONS "${WL2MOD_REGISTER_FUNCTION}")
-        set_property(GLOBAL APPEND PROPERTY WL2_MODULE_REGISTRY_VERSIONS "${WL2MOD_VERSION}")
-        set_property(GLOBAL APPEND PROPERTY WL2_MODULE_REGISTRY_STABLE_IDS "${WL2MOD_STABLE_ID}")
-        set_property(GLOBAL APPEND PROPERTY WL2_MODULE_REGISTRY_FEATURES "${WL2MOD_FEATURE}")
-        set_property(GLOBAL APPEND PROPERTY WL2_MODULE_REGISTRY_TEST_DIRS "${WL2MOD_TEST_DIR}")
-        set_property(GLOBAL APPEND PROPERTY WL2_MODULE_REGISTRY_DOCS_DIRS "${WL2MOD_DOCS_DIR}")
-        set(_wl2_registry_requires "${_wl2_module_requires_joined}")
-        if(_wl2_registry_requires STREQUAL "")
-            set(_wl2_registry_requires "-")
-        endif()
-        set(_wl2_registry_optional "${_wl2_module_optional_joined}")
-        if(_wl2_registry_optional STREQUAL "")
-            set(_wl2_registry_optional "-")
-        endif()
-        set_property(GLOBAL APPEND PROPERTY WL2_MODULE_REGISTRY_REQUIRES "${_wl2_registry_requires}")
-        set_property(GLOBAL APPEND PROPERTY WL2_MODULE_REGISTRY_OPTIONAL "${_wl2_registry_optional}")
     endif()
+    set_property(GLOBAL APPEND PROPERTY WL2_MODULE_REGISTRY_MODULE_NAMES "${WL2MOD_MODULE_NAME}")
+    set_property(GLOBAL APPEND PROPERTY WL2_MODULE_REGISTRY_STATIC_TARGETS "${WL2MOD_STATIC_TARGET}")
+    set_property(GLOBAL APPEND PROPERTY WL2_MODULE_REGISTRY_DYNAMIC_TARGETS "${WL2MOD_DYNAMIC_TARGET}")
+    set_property(GLOBAL APPEND PROPERTY WL2_MODULE_REGISTRY_REGISTRATION_FUNCTIONS "${WL2MOD_REGISTER_FUNCTION}")
+    set_property(GLOBAL APPEND PROPERTY WL2_MODULE_REGISTRY_VERSIONS "${WL2MOD_VERSION}")
+    set_property(GLOBAL APPEND PROPERTY WL2_MODULE_REGISTRY_STABLE_IDS "${WL2MOD_STABLE_ID}")
+    set_property(GLOBAL APPEND PROPERTY WL2_MODULE_REGISTRY_FEATURES "${WL2MOD_FEATURE}")
+    set_property(GLOBAL APPEND PROPERTY WL2_MODULE_REGISTRY_TEST_DIRS "${WL2MOD_TEST_DIR}")
+    set_property(GLOBAL APPEND PROPERTY WL2_MODULE_REGISTRY_DOCS_DIRS "${WL2MOD_DOCS_DIR}")
+    set(_wl2_registry_requires "${_wl2_module_requires_joined}")
+    if(_wl2_registry_requires STREQUAL "")
+        set(_wl2_registry_requires "-")
+    endif()
+    set(_wl2_registry_optional "${_wl2_module_optional_joined}")
+    if(_wl2_registry_optional STREQUAL "")
+        set(_wl2_registry_optional "-")
+    endif()
+    set_property(GLOBAL APPEND PROPERTY WL2_MODULE_REGISTRY_REQUIRES "${_wl2_registry_requires}")
+    set_property(GLOBAL APPEND PROPERTY WL2_MODULE_REGISTRY_OPTIONAL "${_wl2_registry_optional}")
+    string(REPLACE ";" "|" _wl2_registry_bundled "${WL2MOD_DYNAMIC_BUNDLED_LIBRARIES}")
+    if(_wl2_registry_bundled STREQUAL "")
+        set(_wl2_registry_bundled "-")
+    endif()
+    set_property(GLOBAL APPEND PROPERTY WL2_MODULE_REGISTRY_BUNDLED_LIBRARIES "${_wl2_registry_bundled}")
 endfunction()
 
 # Topologically sort the registered builtin static modules by their declared
@@ -687,5 +770,125 @@ function(wl2_generate_static_module_registry)
     endif()
     if(WL2REG_OUT_TARGETS)
         set(${WL2REG_OUT_TARGETS} ${_wl2_static_targets} PARENT_SCOPE)
+    endif()
+endfunction()
+
+function(wl2_generate_dynamic_module_store)
+    set(options)
+    set(oneValueArgs OUT_TARGET STORE_DIR)
+    set(multiValueArgs)
+    cmake_parse_arguments(WL2DYN "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+
+    if(NOT WL2DYN_STORE_DIR)
+        set(WL2DYN_STORE_DIR "${CMAKE_BINARY_DIR}/lib/wl2/modules")
+    endif()
+
+    get_property(_names GLOBAL PROPERTY WL2_MODULE_REGISTRY_MODULE_NAMES)
+    get_property(_targets GLOBAL PROPERTY WL2_MODULE_REGISTRY_DYNAMIC_TARGETS)
+    get_property(_versions GLOBAL PROPERTY WL2_MODULE_REGISTRY_VERSIONS)
+    get_property(_stable_ids GLOBAL PROPERTY WL2_MODULE_REGISTRY_STABLE_IDS)
+    get_property(_requires GLOBAL PROPERTY WL2_MODULE_REGISTRY_REQUIRES)
+    get_property(_optional GLOBAL PROPERTY WL2_MODULE_REGISTRY_OPTIONAL)
+    get_property(_bundled GLOBAL PROPERTY WL2_MODULE_REGISTRY_BUNDLED_LIBRARIES)
+
+    set(_existing_targets)
+    set(_script "set(_wl2_store_dir [[${WL2DYN_STORE_DIR}]])\n")
+    string(APPEND _script "file(REMOVE_RECURSE \"\${_wl2_store_dir}\")\n")
+    string(APPEND _script "file(MAKE_DIRECTORY \"\${_wl2_store_dir}\")\n")
+    string(APPEND _script "set(_wl2_index \"schema: wl2.module-index.v2\\nmodules:\\n\")\n")
+
+    list(LENGTH _names _count)
+    if(_count GREATER 0)
+        math(EXPR _last "${_count} - 1")
+        foreach(_i RANGE ${_last})
+            list(GET _names ${_i} _name)
+            list(GET _targets ${_i} _target)
+            list(GET _versions ${_i} _version)
+            list(GET _stable_ids ${_i} _stable_id)
+            list(GET _requires ${_i} _req)
+            list(GET _optional ${_i} _opt)
+            list(GET _bundled ${_i} _bundle)
+            if(NOT TARGET ${_target})
+                continue()
+            endif()
+            list(APPEND _existing_targets ${_target})
+            string(MAKE_C_IDENTIFIER "${_name}" _slug)
+            string(APPEND _script
+                "set(_wl2_name [[${_name}]])\n"
+                "set(_wl2_slug [[${_slug}]])\n"
+                "set(_wl2_version [[${_version}]])\n"
+                "set(_wl2_stable_id [[${_stable_id}]])\n"
+                "set(_wl2_required [[${_req}]])\n"
+                "set(_wl2_optional [[${_opt}]])\n"
+                "set(_wl2_source [[$<TARGET_FILE:${_target}>]])\n"
+                "get_filename_component(_wl2_library \"\${_wl2_source}\" NAME)\n"
+                "set(_wl2_dir \"\${_wl2_store_dir}/\${_wl2_slug}\")\n"
+                "file(MAKE_DIRECTORY \"\${_wl2_dir}\")\n"
+                "file(COPY_FILE \"\${_wl2_source}\" \"\${_wl2_dir}/\${_wl2_library}\" ONLY_IF_DIFFERENT)\n"
+                "file(SHA256 \"\${_wl2_dir}/\${_wl2_library}\" _wl2_sha256)\n"
+                "set(_wl2_bundle [[${_bundle}]])\n"
+                "if(NOT \"\${_wl2_bundle}\" STREQUAL \"\" AND NOT \"\${_wl2_bundle}\" STREQUAL \"-\")\n"
+                "  file(MAKE_DIRECTORY \"\${_wl2_dir}/deps\")\n"
+                "  string(REPLACE \"|\" \";\" _wl2_bundle_list \"\${_wl2_bundle}\")\n"
+                "  foreach(_wl2_dep_lib IN LISTS _wl2_bundle_list)\n"
+                "    get_filename_component(_wl2_dep_name \"\${_wl2_dep_lib}\" NAME)\n"
+                "    file(COPY_FILE \"\${_wl2_dep_lib}\" \"\${_wl2_dir}/deps/\${_wl2_dep_name}\" ONLY_IF_DIFFERENT)\n"
+                "  endforeach()\n"
+                "endif()\n"
+                "set(_wl2_deps \"\")\n"
+                "if(NOT \"\${_wl2_required}\" STREQUAL \"\" AND NOT \"\${_wl2_required}\" STREQUAL \"-\")\n"
+                "  string(APPEND _wl2_deps \"dependencies:\\n  required:\\n\")\n"
+                "  string(REPLACE \"|\" \";\" _wl2_req_list \"\${_wl2_required}\")\n"
+                "  foreach(_wl2_dep IN LISTS _wl2_req_list)\n"
+                "    string(APPEND _wl2_deps \"    - name: \${_wl2_dep}\\n\")\n"
+                "  endforeach()\n"
+                "endif()\n"
+                "if(NOT \"\${_wl2_optional}\" STREQUAL \"\" AND NOT \"\${_wl2_optional}\" STREQUAL \"-\")\n"
+                "  if(_wl2_deps STREQUAL \"\")\n"
+                "    string(APPEND _wl2_deps \"dependencies:\\n\")\n"
+                "  endif()\n"
+                "  string(APPEND _wl2_deps \"  optional:\\n\")\n"
+                "  string(REPLACE \"|\" \";\" _wl2_opt_list \"\${_wl2_optional}\")\n"
+                "  foreach(_wl2_dep IN LISTS _wl2_opt_list)\n"
+                "    string(APPEND _wl2_deps \"    - name: \${_wl2_dep}\\n\")\n"
+                "  endforeach()\n"
+                "endif()\n"
+                "file(WRITE \"\${_wl2_dir}/wl2.module.yml\"\n"
+                "  \"schema: wl2.module.v2\\n\"\n"
+                "  \"name: \${_wl2_name}\\n\"\n"
+                "  \"version: \${_wl2_version}\\n\"\n"
+                "  \"build: ${APPBUILD}\\n\"\n"
+                "  \"abi: 4\\n\"\n"
+                "  \"stableId: \${_wl2_stable_id}\\n\"\n"
+                "  \"library: \${_wl2_library}\\n\"\n"
+                "  \"sha256: \${_wl2_sha256}\\n\"\n"
+                "  \"\${_wl2_deps}\")\n"
+                "string(APPEND _wl2_index \"  - name: \${_wl2_name}\\n\")\n"
+                "string(APPEND _wl2_index \"    slug: \${_wl2_slug}\\n\")\n"
+                "string(APPEND _wl2_index \"    version: \${_wl2_version}\\n\")\n"
+                "string(APPEND _wl2_index \"    build: ${APPBUILD}\\n\")\n"
+                "string(APPEND _wl2_index \"    abi: 4\\n\")\n"
+                "string(APPEND _wl2_index \"    library: \${_wl2_library}\\n\")\n"
+                "string(APPEND _wl2_index \"    sha256: \${_wl2_sha256}\\n\")\n"
+                "if(NOT _wl2_deps STREQUAL \"\")\n"
+                "  string(REPLACE \"\\n\" \"\\n    \" _wl2_index_deps \"\${_wl2_deps}\")\n"
+                "  string(APPEND _wl2_index \"    \${_wl2_index_deps}\")\n"
+                "endif()\n")
+        endforeach()
+    endif()
+
+    string(APPEND _script "file(WRITE \"\${_wl2_store_dir}/index.yml\" \"\${_wl2_index}\")\n")
+
+    set(_script_path "${CMAKE_BINARY_DIR}/generated/wl2_stage_dynamic_modules.cmake")
+    file(GENERATE OUTPUT "${_script_path}" CONTENT "${_script}")
+
+    add_custom_target(wl2_stage_dynamic_modules
+        COMMAND ${CMAKE_COMMAND} -P "${_script_path}"
+        DEPENDS ${_existing_targets}
+        COMMENT "Staging Winglib2 dynamic modules in ${WL2DYN_STORE_DIR}"
+        VERBATIM)
+
+    if(WL2DYN_OUT_TARGET)
+        set(${WL2DYN_OUT_TARGET} wl2_stage_dynamic_modules PARENT_SCOPE)
     endif()
 endfunction()

@@ -1,0 +1,15 @@
+schema: wl2.resources.v1
+prefix: wl2:/app
+root: .
+entry: main.js
+
+modules:
+  require:
+    - wl2:curl
+
+resources:
+  store:
+    files:
+      - main.js
+      - config.json
+      - payload.txt

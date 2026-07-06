@@ -123,6 +123,36 @@ int shadowing_is_diagnostic() {
     return 0;
 }
 
+int module_path_ranks_between_explicit_and_project() {
+    auto modulePath = provider("wl2:fs", "0.3.0", wl2::ModuleProvider::Source::ModulePath);
+    auto project = provider("wl2:fs", "0.2.0", wl2::ModuleProvider::Source::Project);
+    auto explicitProvider = provider("wl2:fs", "0.1.0", wl2::ModuleProvider::Source::Explicit);
+
+    // ModulePath beats Project.
+    {
+        wl2::ModuleResolutionRequest request;
+        request.roots.push_back({.name = "wl2:fs", .kind = wl2::ModuleDependencyKind::Required});
+        request.providers = {project, modulePath};
+        auto plan = wl2::resolveModuleGraph(request);
+        if (!plan || plan.value().loadOrder.empty()
+            || plan.value().loadOrder[0].provider.source != wl2::ModuleProvider::Source::ModulePath) {
+            return fail("module-path provider did not outrank project provider");
+        }
+    }
+    // Explicit beats ModulePath.
+    {
+        wl2::ModuleResolutionRequest request;
+        request.roots.push_back({.name = "wl2:fs", .kind = wl2::ModuleDependencyKind::Required});
+        request.providers = {modulePath, explicitProvider};
+        auto plan = wl2::resolveModuleGraph(request);
+        if (!plan || plan.value().loadOrder.empty()
+            || plan.value().loadOrder[0].provider.source != wl2::ModuleProvider::Source::Explicit) {
+            return fail("explicit provider did not outrank module-path provider");
+        }
+    }
+    return 0;
+}
+
 int source_metadata() {
     const fs::path root = fs::temp_directory_path() / fs::path("wl2-module-source-" + std::to_string(::getpid()));
     fs::remove_all(root);
@@ -297,6 +327,7 @@ int wl2_module_resolver_tests_entry() {
     if (int rc = version_mismatch_fails(); rc != 0) return rc;
     if (int rc = stable_id_mismatch_fails(); rc != 0) return rc;
     if (int rc = shadowing_is_diagnostic(); rc != 0) return rc;
+    if (int rc = module_path_ranks_between_explicit_and_project(); rc != 0) return rc;
     if (int rc = source_metadata(); rc != 0) return rc;
     if (int rc = resolves_dependency_order(); rc != 0) return rc;
     if (int rc = diamond_graph(); rc != 0) return rc;

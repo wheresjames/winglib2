@@ -93,7 +93,7 @@ install and is not part of the all-dependencies download path.
 **2. Run a script.** This runs one of the bundled examples:
 
 ```sh
-./winglib2/build/app/wl2/wl2 run winglib2/examples/cpp/embedded/scripts/main.js
+./winglib2/build/bin/wl2 run winglib2/examples/cpp/embedded/scripts/main.js
 # → hello from embedded winglib2
 ```
 
@@ -262,7 +262,9 @@ The most useful configure options:
 -DWL2_DEPS_CURL=system         # local, system, download, off, or auto
 -DWL2_LIBMEMBUS_TARGET_VERSION=2.1.0 # default; enables mempkt PacketBuffer
 -DWL2_ENABLE_ALL_MODULES=ON    # build every discovered in-tree module
--DWL2_BUILD_SHARED_MODULES=OFF # default; dynamic module loading is experimental
+-DWL2_MODULE_LINKAGE=both      # default; also: dynamic (store only), static (builtin runner)
+-DWL2_WL2_MODULE_MODE=dynamic  # runner module mode: dynamic (default), static,
+                                # or dynamic-with-static-fallback; follows the linkage default
 -DWL2_ENABLE_STRESS_TESTS=OFF  # default; opt in to stress CTest entries
 -DWL2_ENABLE_LIBMEMBUS=ON      # default
 ```
@@ -306,15 +308,15 @@ a local V8 monolith, but QuickJS is the recommended path for now.
 Run a plain script file:
 
 ```sh
-./winglib2/build/app/wl2/wl2 run winglib2/examples/cpp/embedded/scripts/main.js
+./winglib2/build/bin/wl2 run winglib2/examples/cpp/embedded/scripts/main.js
 # → hello from embedded winglib2
 ```
 
 Inspect a native module's API, or pass your own arguments after the script:
 
 ```sh
-./winglib2/build/app/wl2/wl2 showapi wl2:curl
-./winglib2/build/app/wl2/wl2 run script.js alpha beta   # wl2.runtime.argv === ["alpha", "beta"]
+./winglib2/build/bin/wl2 showapi wl2:curl
+./winglib2/build/bin/wl2 run script.js alpha beta   # wl2.runtime.argv === ["alpha", "beta"]
 ```
 
 **Helpful errors.** Stack traces are on by default; use `--stack-traces=off` for
@@ -323,7 +325,7 @@ comment, Winglib2 remaps stack locations back to your original source (external
 map files and inline base64 maps are both supported).
 
 ```sh
-./winglib2/build/app/wl2/wl2 run --stack-traces=off winglib2/test/scripts/failing.js
+./winglib2/build/bin/wl2 run --stack-traces=off winglib2/test/scripts/failing.js
 ```
 
 **See your configuration** before running — manifest, engine, modules, resource
@@ -331,8 +333,8 @@ maps, filesystem policy, and dependency state. Add `--json` for a stable,
 machine-readable form:
 
 ```sh
-./winglib2/build/app/wl2/wl2 config --manifest wl2.yml
-./winglib2/build/app/wl2/wl2 config --manifest wl2.yml --json
+./winglib2/build/bin/wl2 config --manifest wl2.yml
+./winglib2/build/bin/wl2 config --manifest wl2.yml --json
 ```
 
 **Watch mode** re-runs your app as you edit. It tracks the manifest, lockfile,
@@ -340,7 +342,7 @@ mapped resources, and scripts; changes to native/module libraries are reported a
 `rebuild-needed` (watch mode doesn't rebuild native code):
 
 ```sh
-./winglib2/build/app/wl2/wl2 run --manifest wl2.yml --watch
+./winglib2/build/bin/wl2 run --manifest wl2.yml --watch
 ```
 
 **Permission prompts.** When `wl2 run` is attached to an interactive terminal,
@@ -412,12 +414,12 @@ the crashing thread's C++ stack, plus a machine-readable JSON trailer:
 
 ```sh
 # Default: writes crash-YYYYMMDD-HHMMSS-PID.log in the working directory.
-./winglib2/build/app/wl2/wl2 run --manifest wl2.yml
+./winglib2/build/bin/wl2 run --manifest wl2.yml
 
 # Or choose a directory, an explicit path, or turn it off.
-./winglib2/build/app/wl2/wl2 run --manifest wl2.yml --crash-report-dir ./artifacts
-./winglib2/build/app/wl2/wl2 run --manifest wl2.yml --crash-report=./crash.log
-./winglib2/build/app/wl2/wl2 run --manifest wl2.yml --crash-report=off
+./winglib2/build/bin/wl2 run --manifest wl2.yml --crash-report-dir ./artifacts
+./winglib2/build/bin/wl2 run --manifest wl2.yml --crash-report=./crash.log
+./winglib2/build/bin/wl2 run --manifest wl2.yml --crash-report=off
 ```
 
 Windows crash handling is deferred, and only the crashing thread's stack is
@@ -431,7 +433,7 @@ Debug the runner and native modules with GDB or LLDB by handing them the usual
 ```sh
 cmake -S winglib2 -B winglib2/build -G Ninja -DCMAKE_BUILD_TYPE=Debug
 cmake --build winglib2/build --target wl2
-gdb --args winglib2/build/app/wl2/wl2 \
+gdb --args winglib2/build/bin/wl2 \
     run --manifest winglib2/examples/js/resources/resources.yml
 ```
 
@@ -442,29 +444,61 @@ Full guide: [docs/native-debugging.md](docs/native-debugging.md).
 
 ## Native Modules
 
-> **In short:** modules are C++ libraries your JavaScript can import. Prefer
-> linking them in statically; on Linux/macOS you can also load them dynamically.
+> **In short:** modules are C++ libraries your JavaScript can import. The `wl2`
+> runner loads them dynamically from a module store by default; static module
+> archives remain first-class for embedding and single-binary deployments.
 
-Static modules are the recommended path: they're linked into `wl2` (or into a
-standalone executable you generate) and registered with the runtime at startup.
-You build them with the `wl2_add_module()` helper from `WL2Modules.cmake`, which
-creates the static target, optionally a dynamic one (`WL2_BUILD_SHARED_MODULES=ON`),
-and wires up include paths, dependencies, and packaging. Conventions and a
-checklist for writing one are in [docs/modules.md](docs/modules.md).
+The default build (`WL2_MODULE_LINKAGE=both`) produces two artifacts per module:
+a **dynamic runtime module** staged into the module store
+(`build/lib/wl2/modules/<id>/` in the build tree, `<prefix>/lib/wl2/modules/<id>/`
+when installed, each payload beside its `wl2.module.yml` metadata and checksum),
+and a **static SDK archive** (`libwl2_<name>_static.a`, exported as
+`winglib2::wl2_<name>_static`) for C++ embedders and static runners. You build
+both with the `wl2_add_module()` helper from `WL2Modules.cmake`, which wires up
+include paths, dependencies, staging, and packaging. Conventions and a checklist
+for writing one are in [docs/modules.md](docs/modules.md).
 
-**Dynamic loading (Linux/macOS).** A module can also be a shared library loaded
-through a small versioned C ABI. Loading is deliberately limited: modules load
-only from explicit paths (never by scanning directories), there is no unload, and
-Windows is out of scope for now.
+**Dynamic loading (Linux/macOS).** Dynamic modules load through a small
+versioned C ABI. `wl2 run` resolves a manifest's `modules.require` (or a
+script's `wl2:` imports) against anchored module stores — never the shell's
+current directory — validates recorded checksums for installed stores, and
+loads dependencies in topological order. `--module-policy` selects which
+sources participate (`default`, `isolated`, `project-only`, `installed-only`,
+`system`); `--load-module` remains the explicit-path override, and
+`--module-path <dir>` / the `WL2_MODULE_PATH` environment variable add explicit
+module-path stores (always on when set, ranked between `--load-module` and
+project sources, metadata-validated, and reported by `wl2 config` and
+`wl2 module graph`). There is no unload, and Windows is out of scope for now.
 
 ```sh
 # Inspect a dynamic module's metadata without running anything.
-./winglib2/build/app/wl2/wl2 module validate path/to/libwl2_echo.so
+./winglib2/build/bin/wl2 module validate path/to/libwl2_echo.so
 # prints version and, for current modules, build.
 
+# Run with store-based resolution (manifest modules.require or wl2: imports).
+./winglib2/build/bin/wl2 run --manifest wl2.yml
+
 # Load a module by explicit path, then run a script that imports it.
-./winglib2/build/app/wl2/wl2 run --load-module path/to/libwl2_echo.so app.js
+./winglib2/build/bin/wl2 run --load-module path/to/libwl2_echo.so app.js
+
+# Add an explicit module-path store (also settable via WL2_MODULE_PATH).
+WL2_MODULE_PATH=/opt/wl2/modules ./winglib2/build/bin/wl2 run --manifest wl2.yml
 ```
+
+**Static embedding.** `WL2_MODULE_LINKAGE=static` builds a single-binary `wl2`
+with all enabled modules registered at startup (no dynamic store), and
+`WL2_EXAMPLES_MODULE_MODE=static` opts examples into their static-embedding
+variants. C++ hosts link `winglib2::wl2_<name>_static` directly; see
+`examples/cpp/foundations` and `examples/js/3d-dashboard`.
+
+**Dynamic→static fallback.** The default runner (`WL2_WL2_MODULE_MODE=dynamic`)
+links an empty static registry, so a missing required dynamic module fails
+cleanly instead of falling back to a static copy. To opt into a dynamic-first
+runner that can fall back to a statically linked module, build with
+`WL2_WL2_MODULE_MODE=dynamic-with-static-fallback` (the runner then links the
+full static registry and resolves dynamic modules first). `wl2 run` toggles
+the fallback at runtime with `--allow-builtin-module-fallback` /
+`--no-builtin-module-fallback` (the latter is handy for hermetic tests).
 
 **Pinning and installing modules.** A manifest can declare module dependencies
 under `dependencies.modules`, pinned to a `tag` or `commit` (floating branches
@@ -482,8 +516,10 @@ wl2 module uninstall wl2:widgets --scope local
 ```
 
 At runtime, `wl2 run` resolves a manifest's required/optional modules in priority
-order (manifest/lockfile → local → user → system → built-ins), and `wl2 config`
-flags anything shadowed by a higher-priority scope.
+order (explicit `--load-module` → `--module-path`/`WL2_MODULE_PATH` →
+manifest/lockfile → local → build/executable-adjacent store → install-prefix
+store → user → system → built-ins), and `wl2 config` flags anything shadowed by
+a higher-priority source.
 
 **Modules can live outside this tree.**
 [examples/modules/wl2_echo](examples/modules/wl2_echo) is a complete,
@@ -612,7 +648,7 @@ for (const entry of wl2.resources.walk("wl2:/resources/assets")) {
 `wl2:/` namespace, and optionally trace every lookup:
 
 ```sh
-./winglib2/build/app/wl2/wl2 run \
+./winglib2/build/bin/wl2 run \
   --map-resource winglib2/examples/js/resources/files:wl2:/resources \
   winglib2/examples/js/resources/files/main.js
 
@@ -622,9 +658,9 @@ for (const entry of wl2.resources.walk("wl2:/resources/assets")) {
 You can inspect mapped resources from the command line too:
 
 ```sh
-./winglib2/build/app/wl2/wl2 resources list \
+./winglib2/build/bin/wl2 resources list \
   --map-resource winglib2/examples/js/resources/files:wl2:/resources wl2:/resources
-./winglib2/build/app/wl2/wl2 resources read \
+./winglib2/build/bin/wl2 resources read \
   --map-resource winglib2/examples/js/resources/files:wl2:/resources wl2:/resources/config.json
 ```
 
@@ -656,8 +692,8 @@ exclude:
 ```
 
 ```sh
-./winglib2/build/app/wl2/wl2 run    --manifest winglib2/examples/js/resources/resources.yml
-./winglib2/build/app/wl2/wl2 config --manifest winglib2/examples/js/resources/resources.yml
+./winglib2/build/bin/wl2 run    --manifest winglib2/examples/js/resources/resources.yml
+./winglib2/build/bin/wl2 config --manifest winglib2/examples/js/resources/resources.yml
 ```
 
 ```cmake
@@ -675,7 +711,7 @@ A standalone executable built this way carries an inspectable resource table, so
 you (or CI) can list, read, and extract its embedded resources:
 
 ```sh
-WL2=./winglib2/build/app/wl2/wl2
+WL2=./winglib2/build/bin/wl2
 EXE=./winglib2/build/examples/js/resources/wl2_resources_js
 $WL2 resources list    $EXE
 $WL2 resources read    $EXE wl2:/resources/config.json
@@ -882,7 +918,7 @@ cmake -S winglib2 -B build-arm -G Ninja \
 **Known limitations** (this is still a prototype):
 
 - `CurlClient` constructor options aren't persisted yet.
-- Dynamic module loading is disabled by default.
+- Dynamic module loading is Linux/macOS only; the Windows loader path is deferred.
 - The V8 backend needs a complete, compatible V8 install to link.
 - JavaScript thread requests are synchronous at the native boundary;
   event-loop-backed promise scheduling is still future work.

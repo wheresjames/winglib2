@@ -98,7 +98,7 @@ The returned value is the first ready predicate index, or `-1` on timeout.
 Run it directly:
 
 ```sh
-./build/app/wl2/wl2 test/scripts/wl2_membus_smoke.js
+./build/bin/wl2 test/scripts/wl2_membus_smoke.js
 ```
 
 Or through CTest:

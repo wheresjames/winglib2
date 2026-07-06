@@ -23,7 +23,7 @@ The module is gated behind `WL2_ENABLE_ASIO` (default **OFF**) and links into th
 ```sh
 cmake -S . -B build -DWL2_ENABLE_ASIO=ON
 cmake --build build
-build/app/wl2/wl2 run --network-allow 127.0.0.1:7000 app.js
+build/bin/wl2 run --network-allow 127.0.0.1:7000 app.js
 ```
 
 ```js

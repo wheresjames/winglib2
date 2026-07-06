@@ -13,6 +13,7 @@ if(NOT WL2_HAVE_FFMPEG)
 endif()
 
 wl2_add_module(wl2_ffmpeg
+    HAS_DYNAMIC_REGISTER
     MODULE_NAME wl2:ffmpeg
     REGISTER_FUNCTION wl2_ffmpeg_register_module
     STABLE_ID 5f03b3d4-2e2f-4c20-9ac5-fb2dd7ad0f6f

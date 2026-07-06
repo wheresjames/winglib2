@@ -12,9 +12,9 @@ if(WL2_BUILD_EXAMPLES)
     add_subdirectory(examples/cpp/resources)
     add_subdirectory(examples/js/resources)
     add_subdirectory(examples/js/thread-tree)
-    if(TARGET wl2_3d_static AND TARGET wl2_slint_static AND TARGET wl2_membus_static)
-        add_subdirectory(examples/js/3d-dashboard)
-    endif()
+    # 3d-dashboard is a static embedding example; it self-skips when the static
+    # module archives it links against are not built.
+    add_subdirectory(examples/js/3d-dashboard)
     file(GLOB _wl2_example_module_dirs
         CONFIGURE_DEPENDS
         LIST_DIRECTORIES TRUE

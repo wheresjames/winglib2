@@ -220,7 +220,7 @@ private:
     std::thread thread_;
 };
 
-int runChild(const char* wl2, const char* script, const std::string& baseUrl) {
+int runChild(const char* wl2, const char* script, const std::string& baseUrl, bool allowDeclared, bool noPermissionPrompt) {
     std::string postUrl = baseUrl + "/echo";
     ::setenv("WL2_CURL_TEST_URL", baseUrl.c_str(), 1);
     ::setenv("WL2_CURL_TEST_POST_URL", postUrl.c_str(), 1);
@@ -231,12 +231,22 @@ int runChild(const char* wl2, const char* script, const std::string& baseUrl) {
         return 2;
     }
     if (child == 0) {
-        char* const argv[] = {
+        char* argv[6] = {
             const_cast<char*>(wl2),
             const_cast<char*>("run"),
-            const_cast<char*>(script),
+            nullptr,
+            nullptr,
+            nullptr,
             nullptr,
         };
+        int index = 2;
+        if (noPermissionPrompt) {
+            argv[index++] = const_cast<char*>("--no-permission-prompt");
+        }
+        if (allowDeclared) {
+            argv[index++] = const_cast<char*>("--allow-declared");
+        }
+        argv[index++] = const_cast<char*>(script);
         ::execve(wl2, argv, environ);
         std::cerr << "execve: " << std::strerror(errno) << '\n';
         _exit(127);
@@ -259,14 +269,20 @@ int runChild(const char* wl2, const char* script, const std::string& baseUrl) {
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 3) {
-        std::cerr << "usage: wl2_curl_fixture <wl2-executable> <smoke-script>\n";
+    if (argc != 4) {
+        std::cerr << "usage: wl2_curl_fixture <wl2-executable> <smoke-script> <denied-script>\n";
         return 2;
     }
 
     HttpFixture fixture;
     fixture.start();
-    int result = runChild(argv[1], argv[2], fixture.baseUrl());
+    int deniedResult = runChild(argv[1], argv[3], fixture.baseUrl(), false, true);
+    if (deniedResult != 0) {
+        std::cerr << "curl permission-denied script failed with " << deniedResult << '\n';
+        fixture.stop();
+        return deniedResult;
+    }
+    int result = runChild(argv[1], argv[2], fixture.baseUrl(), true, false);
     fixture.stop();
     return result;
 }

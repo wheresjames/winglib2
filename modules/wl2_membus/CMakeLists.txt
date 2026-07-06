@@ -15,21 +15,23 @@ wl2_add_module(wl2_membus
     NO_DYNAMIC_LINK_LIBRARIES
     STATIC_PRIVATE_COMPILE_DEFINITIONS WL2_MEMBUS_STATIC_MODULE=1)
 
-if(TARGET wl2_membus_static)
-    if(WL2_BUILD_EXAMPLES)
-        add_subdirectory(
-            "${PROJECT_SOURCE_DIR}/examples/cpp/foundations"
-            "${CMAKE_BINARY_DIR}/examples/cpp/foundations")
-    endif()
-    if(WL2_BUILD_TESTING)
-        add_test(NAME scripts.wl2_membus_smoke
-            COMMAND
-                $<TARGET_FILE:wl2>
-                run
-                --allow-shared-memory
-                --shared-memory-allow /wl2_js_membus_
-                ${PROJECT_SOURCE_DIR}/test/scripts/wl2_membus_smoke.js)
-        set_tests_properties(scripts.wl2_membus_smoke PROPERTIES
-            LABELS "js;membus")
-    endif()
+# foundations is a static embedding example; it self-skips when the static
+# archive is not built.
+if(WL2_BUILD_EXAMPLES AND TARGET wl2_membus_static)
+    add_subdirectory(
+        "${PROJECT_SOURCE_DIR}/examples/cpp/foundations"
+        "${CMAKE_BINARY_DIR}/examples/cpp/foundations")
+endif()
+# The smoke test runs through the wl2 runner, which loads wl2:membus
+# dynamically from the staged store or statically from builtin registration.
+if(WL2_BUILD_TESTING AND (TARGET wl2_membus OR TARGET wl2_membus_static))
+    add_test(NAME scripts.wl2_membus_smoke
+        COMMAND
+            $<TARGET_FILE:wl2>
+            run
+            --allow-shared-memory
+            --shared-memory-allow /wl2_js_membus_
+            ${PROJECT_SOURCE_DIR}/test/scripts/wl2_membus_smoke.js)
+    set_tests_properties(scripts.wl2_membus_smoke PROPERTIES
+        LABELS "js;membus")
 endif()

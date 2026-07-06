@@ -11,7 +11,7 @@
       "name": "Debug wl2 run (GDB)",
       "type": "cppdbg",
       "request": "launch",
-      "program": "${workspaceFolder}/winglib2/build/app/wl2/wl2",
+      "program": "${workspaceFolder}/winglib2/build/bin/wl2",
       "args": [
         "run",
         "--manifest",
@@ -34,7 +34,7 @@
       "name": "Debug wl2 run (LLDB)",
       "type": "cppdbg",
       "request": "launch",
-      "program": "${workspaceFolder}/winglib2/build/app/wl2/wl2",
+      "program": "${workspaceFolder}/winglib2/build/bin/wl2",
       "args": [
         "run",
         "--manifest",

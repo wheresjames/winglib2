@@ -332,15 +332,17 @@ int checksum_validation() {
         return fail("verifyInstalled did not detect a missing library");
     }
 
-    // A legacy record without a recorded checksum is treated as valid.
+    // A legacy record without a recorded checksum cannot be verified; it yields
+    // `module_checksum_missing` (a warning), not a mismatch or success.
     wl2::InstalledModuleRecord legacy = *record;
     legacy.checksum.clear();
     {
         std::ofstream lib(legacy.libraryPath, std::ios::binary | std::ios::trunc);
         lib << "anything";
     }
-    if (auto rc = store.verifyInstalled(legacy); !rc) {
-        return fail("legacy record without checksum should be treated as valid");
+    auto legacyResult = store.verifyInstalled(legacy);
+    if (legacyResult || legacyResult.error().code() != "module_checksum_missing") {
+        return fail("legacy record without checksum should yield module_checksum_missing");
     }
 
     fs::remove_all(root);

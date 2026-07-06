@@ -66,10 +66,31 @@ if(TARGET wl2_libmembus_dependency)
         endif()
     endif()
 endif()
-# Built-in modules registered via wl2_add_module() add their install targets here.
+# Built-in modules registered via wl2_add_module() add their install targets
+# here. Only static module archives are normal install/export targets; dynamic
+# runtime modules are installed as store payloads below, never as link targets.
 get_property(_wl2_module_install_targets GLOBAL PROPERTY WL2_MODULE_INSTALL_TARGETS)
 if(_wl2_module_install_targets)
     list(APPEND _wl2_install_targets ${_wl2_module_install_targets})
+endif()
+
+# Dynamic runtime module store: install the staged build-tree store (payloads,
+# per-module wl2.module.yml with checksums, scope index.yml, and any bundled
+# deps/ libraries) under ${CMAKE_INSTALL_LIBDIR}/wl2/modules. Installing the
+# staged tree keeps build-tree and installed metadata byte-identical.
+set(WL2_PACKAGE_INSTALLS_DYNAMIC_MODULES FALSE)
+if(WL2_BUILD_SHARED_MODULES)
+    set(_wl2_dynamic_store_dir "${CMAKE_BINARY_DIR}/lib/wl2/modules")
+    install(CODE "
+        if(NOT EXISTS \"${_wl2_dynamic_store_dir}/index.yml\")
+            message(FATAL_ERROR
+                \"Winglib2 dynamic module store was not staged: ${_wl2_dynamic_store_dir}\\n\"
+                \"Build the project (target wl2_stage_dynamic_modules) before installing.\")
+        endif()
+    ")
+    install(DIRECTORY "${_wl2_dynamic_store_dir}/"
+        DESTINATION "${CMAKE_INSTALL_LIBDIR}/wl2/modules")
+    set(WL2_PACKAGE_INSTALLS_DYNAMIC_MODULES TRUE)
 endif()
 
 get_property(_wl2_package_bundle_libraries GLOBAL PROPERTY WL2_PACKAGE_BUNDLE_LIBRARIES)
@@ -208,6 +229,12 @@ if(WL2_PACKAGE_INSTALLS_QUICKJS_HEADERS)
         "${CMAKE_INSTALL_INCLUDEDIR}/quickjs/quickjs-libc.h")
 endif()
 list(APPEND _wl2_installed_manifest_entries ${_wl2_package_bundle_manifest_entries})
+if(WL2_PACKAGE_INSTALLS_DYNAMIC_MODULES)
+    list(APPEND _wl2_installed_manifest_entries
+        "${CMAKE_INSTALL_LIBDIR}/wl2/modules/index.yml"
+        "${CMAKE_INSTALL_LIBDIR}/wl2/modules/*/*"
+        "${CMAKE_INSTALL_LIBDIR}/wl2/modules/*/deps/*")
+endif()
 if(WL2_PACKAGE_EXPORTS_QUICKJS)
     list(APPEND _wl2_installed_manifest_entries
         "${CMAKE_INSTALL_INCLUDEDIR}/quickjs/quickjs.h"

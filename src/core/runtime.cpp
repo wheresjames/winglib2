@@ -65,6 +65,20 @@ bool path_contained_by(const std::filesystem::path& target, const std::filesyste
     return !relative.empty() && *relative.begin() != "..";
 }
 
+std::filesystem::path canonical_permission_path(const std::filesystem::path& path) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path target = path;
+    if (!target.is_absolute()) {
+        target = fs::current_path(ec) / target;
+        if (ec) {
+            return path.lexically_normal();
+        }
+    }
+    fs::path canonical = fs::weakly_canonical(target, ec);
+    return ec ? target.lexically_normal() : canonical;
+}
+
 bool prompt_yes_no(const std::vector<std::string>& requested) {
     std::cerr << "Script requests host permissions:\n";
     for (const auto& item : requested) {
@@ -311,8 +325,8 @@ bool Runtime::hasPermissions(const PermissionSet& requested) const {
     for (const auto& item : requested.network) {
         auto colon = item.rfind(':');
         if (colon == std::string::npos) {
-            if (!endpoint_allowed(options_.networkAllowList, item, 0) &&
-                !endpoint_allowed(dynamicNetworkAllowList_, item, 0)) {
+            if (!((options_.allowNetwork && endpoint_allowed(options_.networkAllowList, item, 0)) ||
+                  endpoint_allowed(dynamicNetworkAllowList_, item, 0))) {
                 return false;
             }
             continue;
@@ -328,8 +342,8 @@ bool Runtime::hasPermissions(const PermissionSet& requested) const {
     for (const auto& item : requested.listen) {
         auto colon = item.rfind(':');
         if (colon == std::string::npos) {
-            if (!endpoint_allowed(options_.listenAllowList, item, 0) &&
-                !endpoint_allowed(dynamicListenAllowList_, item, 0)) {
+            if (!((options_.allowListening && endpoint_allowed(options_.listenAllowList, item, 0)) ||
+                  endpoint_allowed(dynamicListenAllowList_, item, 0))) {
                 return false;
             }
             continue;
@@ -350,14 +364,18 @@ bool Runtime::hasPermissions(const PermissionSet& requested) const {
     }
     for (const auto& item : requested.filesystemRead) {
         bool ok = false;
+        const auto canonicalItem = canonical_permission_path(item);
         for (const auto& root : options_.filesystemReadRoots) {
-            if (options_.allowFilesystemReads && path_contained_by(item.lexically_normal(), root.lexically_normal())) {
+            const auto canonicalRoot = canonical_permission_path(root);
+            if (options_.allowFilesystemReads &&
+                (path_contained_by(canonicalItem, canonicalRoot) || canonicalItem == canonicalRoot)) {
                 ok = true;
                 break;
             }
         }
         for (const auto& root : dynamicFilesystemReadRoots_) {
-            if (path_contained_by(item.lexically_normal(), root.lexically_normal())) {
+            const auto canonicalRoot = canonical_permission_path(root);
+            if (path_contained_by(canonicalItem, canonicalRoot) || canonicalItem == canonicalRoot) {
                 ok = true;
                 break;
             }
@@ -391,9 +409,10 @@ Result<PermissionSet> Runtime::requestPermissions(const PermissionSet& requested
         return false;
     };
     auto path_inside = [](const std::vector<std::filesystem::path>& envelope, const std::filesystem::path& item) {
-        const auto normalized = item.lexically_normal();
+        const auto normalized = canonical_permission_path(item);
         for (const auto& root : envelope) {
-            if (path_contained_by(normalized, root.lexically_normal()) || normalized == root.lexically_normal()) {
+            const auto normalizedRoot = canonical_permission_path(root);
+            if (path_contained_by(normalized, normalizedRoot) || normalized == normalizedRoot) {
                 return true;
             }
         }
@@ -456,8 +475,9 @@ Result<PermissionSet> Runtime::requestPermissions(const PermissionSet& requested
         if ((options_.allowFilesystemReads && path_inside(options_.filesystemReadRoots, item)) ||
             path_inside(dynamicFilesystemReadRoots_, item) ||
             (options_.declaredPermissionsApproved && path_inside(options_.declaredPermissions.filesystemRead, item))) {
-            dynamicFilesystemReadRoots_.push_back(item);
-            granted.filesystemRead.push_back(item);
+            const auto canonicalItem = canonical_permission_path(item);
+            dynamicFilesystemReadRoots_.push_back(canonicalItem);
+            granted.filesystemRead.push_back(canonicalItem);
         } else {
             return deny("filesystemRead " + item.string());
         }

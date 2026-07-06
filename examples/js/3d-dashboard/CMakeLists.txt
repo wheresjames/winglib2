@@ -4,8 +4,10 @@
 # It builds two ways, like the other Winglib2 examples:
 #   * in-tree, added with add_subdirectory() from cmake/WL2Examples.cmake, and
 #   * standalone, configured against an installed Winglib2 package.
-# It needs the wl2_3d, wl2_slint, and wl2_membus static modules; when any is
-# unavailable the example is skipped rather than failing the configure.
+# This is a static embedding example: it links the wl2_3d, wl2_slint, and
+# wl2_membus static module archives directly into a host executable. When any
+# is unavailable the example is skipped rather than failing the configure.
+# For dynamic module loading, see the manifest-driven script examples.
 if(NOT TARGET wl2_core)
     cmake_minimum_required(VERSION 3.24)
     project(wl2_3d_dashboard_example LANGUAGES CXX)

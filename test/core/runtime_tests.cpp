@@ -1,6 +1,8 @@
 #include "wl2/wl2.h"
 
+#include <chrono>
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -62,6 +64,8 @@ assert(blocked, "non-allow-listed env var was not rejected");
 // Network capability policy: denied by default, empty allow-list denies, and
 // allow-list entries permit matching endpoints with stable error codes.
 int run_capability_tests() {
+    namespace fs = std::filesystem;
+
     // Denied by default.
     {
         wl2::Runtime runtime;
@@ -90,6 +94,25 @@ int run_capability_tests() {
         wl2::Runtime runtime{std::move(options)};
         if (runtime.authorizeNetworkConnect("example.com", 443)) {
             return fail("empty allow-list should deny all connections");
+        }
+    }
+
+    // Allow-list entries do not grant host-only hasPermissions checks unless
+    // the corresponding capability switch is enabled.
+    {
+        wl2::RuntimeOptions options;
+        options.networkAllowList = {"example.com"};
+        options.listenAllowList = {"127.0.0.1"};
+        wl2::Runtime runtime{std::move(options)};
+        wl2::PermissionSet requested;
+        requested.network = {"example.com"};
+        if (runtime.hasPermissions(requested)) {
+            return fail("host-only network hasPermissions ignored allowNetwork");
+        }
+        requested.network.clear();
+        requested.listen = {"127.0.0.1"};
+        if (runtime.hasPermissions(requested)) {
+            return fail("host-only listen hasPermissions ignored allowListening");
         }
     }
 
@@ -184,6 +207,35 @@ int run_capability_tests() {
         }
         if (runtime.authorizeSharedMemory("/wl2/run-124/3d/frames")) {
             return fail("non-matching shared-memory prefix should be denied");
+        }
+    }
+
+    // Filesystem permission requests are checked after canonicalization, so a
+    // symlink inside an approved root cannot become a new dynamic root outside it.
+    {
+        const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+        fs::path root = fs::temp_directory_path() / ("wl2-runtime-perms-" + std::to_string(stamp));
+        fs::path allowed = root / "allowed";
+        fs::path outside = root / "outside";
+        fs::create_directories(allowed);
+        fs::create_directories(outside);
+        std::error_code linkEc;
+        fs::create_directory_symlink(outside, allowed / "link", linkEc);
+        if (linkEc) {
+            fs::remove_all(root);
+            return fail("could not create symlink fixture: " + linkEc.message());
+        }
+
+        wl2::RuntimeOptions options;
+        options.declaredPermissionsApproved = true;
+        options.declaredPermissions.filesystemRead = {allowed};
+        wl2::Runtime runtime{std::move(options)};
+        wl2::PermissionSet requested;
+        requested.filesystemRead = {allowed / "link"};
+        auto granted = runtime.requestPermissions(requested);
+        fs::remove_all(root);
+        if (granted || granted.error().code() != "permission_denied") {
+            return fail("symlink filesystem permission request escaped approved root");
         }
     }
 

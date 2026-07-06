@@ -35,12 +35,14 @@ Result<ModuleSourceMetadata> loadModuleSourceMetadata(const std::filesystem::pat
 struct ModuleProvider {
     /// Where a provider was discovered, in increasing priority order.
     enum class Source {
-        Explicit,  ///< Explicitly supplied (e.g. `--load-module`).
-        Project,   ///< Project-local module directory.
-        Local,     ///< Local install scope.
-        User,      ///< Per-user install scope.
-        System,    ///< System install scope.
-        Builtin,   ///< Built-in static module.
+        Explicit,    ///< Explicitly supplied (e.g. `--load-module`).
+        ModulePath,  ///< Explicit module-path directory (`--module-path` / `WL2_MODULE_PATH`).
+        Project,     ///< Project-local module directory.
+        Local,       ///< Local install scope.
+        Install,     ///< Executable-adjacent or compiled install-prefix module store.
+        User,        ///< Per-user install scope.
+        System,      ///< System install scope.
+        Builtin,     ///< Built-in static module.
     };
 
     ModuleInfo info;                   ///< Module metadata.

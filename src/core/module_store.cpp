@@ -448,10 +448,13 @@ Result<void> ModuleStore::verifyInstalled(const InstalledModuleRecord& record) c
         return Error("module_library_missing",
             "Installed module library is missing: " + record.name);
     }
-    // Legacy installs without a recorded checksum cannot be verified; treat as
-    // valid so older scopes keep loading.
+    // A record without a recorded checksum cannot be verified. Surface it as a
+    // distinct warning code so callers can load the module anyway (legacy
+    // installs) without silently accepting a tampered payload.
     if (record.checksum.empty()) {
-        return {};
+        return Error("module_checksum_missing",
+            "Installed module " + record.name + " has no recorded checksum: "
+                + record.libraryPath.string());
     }
     auto actual = sha256File(record.libraryPath);
     if (!actual) {

@@ -26,7 +26,7 @@ The module is gated behind `WL2_ENABLE_SLINT` (default **OFF**) and links into t
 ```sh
 cmake -S . -B build -DWL2_ENABLE_SLINT=ON -DWL2_DEPS_SLINT=download
 cmake --build build
-build/app/wl2/wl2 run --allow-ui app.js
+build/bin/wl2 run --allow-ui app.js
 ```
 
 ```js

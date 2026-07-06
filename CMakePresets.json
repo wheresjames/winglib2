@@ -18,16 +18,64 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release"
       }
+    },
+    {
+      "name": "linkage-both",
+      "displayName": "Module linkage: both (default)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/linkage-both",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "WL2_MODULE_LINKAGE": "both"
+      }
+    },
+    {
+      "name": "linkage-dynamic",
+      "displayName": "Module linkage: dynamic only",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/linkage-dynamic",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "WL2_MODULE_LINKAGE": "dynamic"
+      }
+    },
+    {
+      "name": "linkage-static",
+      "displayName": "Module linkage: static only (builtin runner)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/linkage-static",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "WL2_MODULE_LINKAGE": "static"
+      }
     }
   ],
   "buildPresets": [
     { "name": "debug", "configurePreset": "debug" },
-    { "name": "release", "configurePreset": "release" }
+    { "name": "release", "configurePreset": "release" },
+    { "name": "linkage-both", "configurePreset": "linkage-both" },
+    { "name": "linkage-dynamic", "configurePreset": "linkage-dynamic" },
+    { "name": "linkage-static", "configurePreset": "linkage-static" }
   ],
   "testPresets": [
     {
       "name": "debug",
       "configurePreset": "debug",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "linkage-both",
+      "configurePreset": "linkage-both",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "linkage-dynamic",
+      "configurePreset": "linkage-dynamic",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "linkage-static",
+      "configurePreset": "linkage-static",
       "output": { "outputOnFailure": true }
     }
   ]

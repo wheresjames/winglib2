@@ -12,7 +12,9 @@ if(NOT TARGET wl2)
 else()
     set(WL2_EXE_TARGET wl2)
     set(WL2_HAVE_MEMBUS_EXAMPLE_TARGET FALSE)
-    if(TARGET wl2_membus_static)
+    # The runner resolves wl2:membus dynamically from the staged store or
+    # statically from builtin registration; either module artifact suffices.
+    if(TARGET wl2_membus_static OR TARGET wl2_membus)
         set(WL2_HAVE_MEMBUS_EXAMPLE_TARGET TRUE)
     endif()
 endif()

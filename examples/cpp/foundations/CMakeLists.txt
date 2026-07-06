@@ -1,3 +1,6 @@
+# Static embedding example: links the wl2:membus static module archive into a
+# host executable through direct static registration. The dynamic module store
+# is not used here; see the manifest-driven script examples for dynamic loading.
 if(NOT TARGET wl2_core)
     cmake_minimum_required(VERSION 3.24)
     project(wl2_foundations_example LANGUAGES CXX)
@@ -8,6 +11,10 @@ if(NOT TARGET wl2_core)
     endif()
     set(WL2_MEMBUS_TARGET winglib2::wl2_membus_static)
 else()
+    if(NOT TARGET wl2_membus_static)
+        # Static modules are disabled in this build; skip the example quietly.
+        return()
+    endif()
     set(WL2_CORE_TARGET wl2_core)
     set(WL2_MEMBUS_TARGET wl2_membus_static)
 endif()

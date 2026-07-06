@@ -8,6 +8,7 @@
 #include <cctype>
 #include <chrono>
 #include <map>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -48,6 +49,11 @@ struct CurlRequest {
     long timeoutMs = 30000;
     bool followRedirects = false;
     bool insecureSkipTlsVerify = false;
+};
+
+struct CurlAuthState {
+    wl2::Runtime* runtime = nullptr;
+    std::string denied;
 };
 
 struct CurlResponse {
@@ -218,17 +224,42 @@ JSValue make_wl2_buffer(JSContext* ctx, const std::string& bytes) {
     return result;
 }
 
-CurlResponse perform_request(const CurlRequest& request) {
+int authorize_connection(void* clientp, char* connPrimaryIp, char*, int connPrimaryPort, int) {
+    auto* state = static_cast<CurlAuthState*>(clientp);
+    if (!state || !state->runtime) {
+        return CURL_PREREQFUNC_ABORT;
+    }
+    const std::string host = connPrimaryIp ? connPrimaryIp : "";
+    if (host.empty() || connPrimaryPort <= 0 || connPrimaryPort > 65535) {
+        state->denied = "curl resolved an invalid endpoint";
+        return CURL_PREREQFUNC_ABORT;
+    }
+    auto allowed = state->runtime->authorizeNetworkConnect(
+        host,
+        static_cast<uint16_t>(connPrimaryPort));
+    if (!allowed) {
+        state->denied = allowed.error().code() + ": " + allowed.error().message();
+        return CURL_PREREQFUNC_ABORT;
+    }
+    return CURL_PREREQFUNC_OK;
+}
+
+CurlResponse perform_request(wl2::Runtime* runtime, const CurlRequest& request) {
     CurlResponse response;
     CURL* curl = curl_easy_init();
     if (!curl) {
         throw std::runtime_error("curl_easy_init failed");
+    }
+    if (!runtime) {
+        curl_easy_cleanup(curl);
+        throw std::runtime_error("runtime unavailable");
     }
 
     curl_slist* headers = nullptr;
     for (const auto& header : request.headers) {
         headers = curl_slist_append(headers, header.c_str());
     }
+    CurlAuthState auth{runtime, {}};
 
     auto started = std::chrono::steady_clock::now();
 
@@ -246,6 +277,8 @@ CurlResponse perform_request(const CurlRequest& request) {
     curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "http,https");
     curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
 #endif
+    curl_easy_setopt(curl, CURLOPT_PREREQFUNCTION, authorize_connection);
+    curl_easy_setopt(curl, CURLOPT_PREREQDATA, &auth);
     if (headers) {
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     }
@@ -266,7 +299,7 @@ CurlResponse perform_request(const CurlRequest& request) {
     response.totalMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
 
     if (code != CURLE_OK) {
-        std::string message = curl_easy_strerror(code);
+        std::string message = auth.denied.empty() ? curl_easy_strerror(code) : auth.denied;
         if (headers) {
             curl_slist_free_all(headers);
         }
@@ -322,6 +355,7 @@ JSValue throw_curl_error(JSContext* ctx, const char* operation, const std::excep
 
 JSValue curl_get(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv) {
     (void)thisVal;
+    auto* runtime = static_cast<wl2::Runtime*>(JS_GetContextOpaque(ctx));
     CurlRequest request;
     request.method = "GET";
     const char* url = argc > 0 ? JS_ToCString(ctx, argv[0]) : nullptr;
@@ -334,7 +368,7 @@ JSValue curl_get(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* a
         read_options(ctx, argv[1], request);
     }
     try {
-        return make_response(ctx, perform_request(request));
+        return make_response(ctx, perform_request(runtime, request));
     } catch (const std::exception& e) {
         return throw_curl_error(ctx, "get", e);
     }
@@ -342,6 +376,7 @@ JSValue curl_get(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* a
 
 JSValue curl_post(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv) {
     (void)thisVal;
+    auto* runtime = static_cast<wl2::Runtime*>(JS_GetContextOpaque(ctx));
     CurlRequest request;
     request.method = "POST";
     const char* url = argc > 0 ? JS_ToCString(ctx, argv[0]) : nullptr;
@@ -362,7 +397,7 @@ JSValue curl_post(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* 
         read_options(ctx, argv[2], request);
     }
     try {
-        return make_response(ctx, perform_request(request));
+        return make_response(ctx, perform_request(runtime, request));
     } catch (const std::exception& e) {
         return throw_curl_error(ctx, "post", e);
     }
@@ -370,6 +405,7 @@ JSValue curl_post(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* 
 
 JSValue curl_client_request(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv) {
     (void)thisVal;
+    auto* runtime = static_cast<wl2::Runtime*>(JS_GetContextOpaque(ctx));
     if (argc < 1 || !JS_IsObject(argv[0])) {
         return JS_ThrowTypeError(ctx, "CurlClient.request(request) requires an object");
     }
@@ -388,7 +424,7 @@ JSValue curl_client_request(JSContext* ctx, JSValueConst thisVal, int argc, JSVa
     read_options(ctx, argv[0], request);
 
     try {
-        return make_response(ctx, perform_request(request));
+        return make_response(ctx, perform_request(runtime, request));
     } catch (const std::exception& e) {
         return throw_curl_error(ctx, "request", e);
     }

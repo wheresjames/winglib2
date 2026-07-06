@@ -144,13 +144,15 @@ int compare_versions(const Version& a, const Version& b) {
 int source_rank(ModuleProvider::Source source) {
     switch (source) {
         case ModuleProvider::Source::Explicit: return 0;
-        case ModuleProvider::Source::Project: return 1;
-        case ModuleProvider::Source::Local: return 2;
-        case ModuleProvider::Source::User: return 3;
-        case ModuleProvider::Source::System: return 4;
-        case ModuleProvider::Source::Builtin: return 5;
+        case ModuleProvider::Source::ModulePath: return 1;
+        case ModuleProvider::Source::Project: return 2;
+        case ModuleProvider::Source::Local: return 3;
+        case ModuleProvider::Source::Install: return 4;
+        case ModuleProvider::Source::User: return 5;
+        case ModuleProvider::Source::System: return 6;
+        case ModuleProvider::Source::Builtin: return 7;
     }
-    return 5;
+    return 7;
 }
 
 struct Resolver {
@@ -325,8 +327,10 @@ struct Resolver {
 std::string moduleProviderSourceName(ModuleProvider::Source source) {
     switch (source) {
         case ModuleProvider::Source::Explicit: return "explicit";
+        case ModuleProvider::Source::ModulePath: return "module-path";
         case ModuleProvider::Source::Project: return "project";
         case ModuleProvider::Source::Local: return "local";
+        case ModuleProvider::Source::Install: return "install";
         case ModuleProvider::Source::User: return "user";
         case ModuleProvider::Source::System: return "system";
         case ModuleProvider::Source::Builtin: return "builtin";

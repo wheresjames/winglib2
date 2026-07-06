@@ -18,7 +18,7 @@ cmake --build winglib2/build --target wl2
 The runner is built at:
 
 ```text
-winglib2/build/app/wl2/wl2
+winglib2/build/bin/wl2
 ```
 
 The bundled CMake presets also provide a `debug` configuration that writes to
@@ -42,7 +42,7 @@ Launch the runner under GDB with the same arguments you would pass on the
 command line. Everything after the program name is passed to `wl2`:
 
 ```sh
-gdb --args winglib2/build/app/wl2/wl2 \
+gdb --args winglib2/build/bin/wl2 \
     run --manifest winglib2/examples/js/resources/resources.yml
 ```
 
@@ -71,7 +71,7 @@ registration or native functions; GDB resolves them once the library is
 LLDB takes the same arguments after `--`:
 
 ```sh
-lldb -- winglib2/build/app/wl2/wl2 \
+lldb -- winglib2/build/bin/wl2 \
     run --manifest winglib2/examples/js/resources/resources.yml
 ```
 
@@ -101,7 +101,7 @@ If you prefer post-mortem core dumps, enable them in your shell
 (`ulimit -c unlimited`) and open the core with the matching binary:
 
 ```sh
-gdb winglib2/build/app/wl2/wl2 core
+gdb winglib2/build/bin/wl2 core
 ```
 
 ## VSCode

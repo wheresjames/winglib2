@@ -99,9 +99,10 @@ public:
     std::optional<InstalledModuleRecord> resolve(const std::string& name) const;
 
     /// Verify an installed module's library against the checksum recorded at
-    /// install time. Returns `module_library_missing` when the library is gone or
-    /// `module_checksum_mismatch` when its contents have changed. A record with no
-    /// recorded checksum (legacy install) is treated as valid.
+    /// install time. Returns `module_library_missing` when the library is gone,
+    /// `module_checksum_mismatch` when its contents have changed (fatal for a
+    /// required module), or `module_checksum_missing` when no checksum was
+    /// recorded (a warning: the module still loads but cannot be verified).
     Result<void> verifyInstalled(const InstalledModuleRecord& record) const;
 
     /// Installed modules in a single scope.

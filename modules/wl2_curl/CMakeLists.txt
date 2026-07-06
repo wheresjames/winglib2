@@ -42,11 +42,13 @@ else()
         COMPILE_DEFINITIONS CURL_STATICLIB)
 endif()
 
+# The example runs dynamically through the wl2 runner by default; it only
+# needs the static archive when WL2_EXAMPLES_MODULE_MODE=static.
+if(WL2_BUILD_EXAMPLES AND (TARGET wl2_curl OR TARGET wl2_curl_static))
+    add_subdirectory(
+        "${PROJECT_SOURCE_DIR}/examples/js/curl-resources"
+        "${CMAKE_BINARY_DIR}/examples/js/curl-resources")
+endif()
 if(TARGET wl2_curl_static)
-    if(WL2_BUILD_EXAMPLES)
-        add_subdirectory(
-            "${PROJECT_SOURCE_DIR}/examples/js/curl-resources"
-            "${CMAKE_BINARY_DIR}/examples/js/curl-resources")
-    endif()
     wl2_add_module_tests(wl2_curl)
 endif()

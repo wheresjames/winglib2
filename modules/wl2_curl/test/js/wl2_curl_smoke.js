@@ -1,3 +1,8 @@
+/* wl2
+permissions:
+  network: ["127.0.0.1:*"]
+*/
+
 import { get, post, CurlClient } from "wl2:curl";
 
 const configuredUrl = globalThis.WL2_CURL_TEST_URL || "";
@@ -22,6 +27,9 @@ function bodyText(response) {
 }
 
 console.log("wl2_curl smoke test:", textUrl);
+
+const permission = await wl2.runtime.requestPermissions({ network: ["127.0.0.1:*"] });
+assert(permission.granted === true, `network permission was not granted: ${permission.error}`);
 
 const getResponse = await get(textUrl, {
   timeoutMs: 5000,

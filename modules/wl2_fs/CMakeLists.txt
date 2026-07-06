@@ -15,11 +15,13 @@ wl2_add_module(wl2_fs
     NO_DYNAMIC_LINK_LIBRARIES
     STATIC_PRIVATE_COMPILE_DEFINITIONS WL2_FS_STATIC_MODULE=1)
 
+# The example runs dynamically through the wl2 runner by default; it only
+# needs the static archive when WL2_EXAMPLES_MODULE_MODE=static.
+if(WL2_BUILD_EXAMPLES AND (TARGET wl2_fs OR TARGET wl2_fs_static))
+    add_subdirectory(
+        "${PROJECT_SOURCE_DIR}/examples/js/fs-inspect"
+        "${CMAKE_BINARY_DIR}/examples/js/fs-inspect")
+endif()
 if(TARGET wl2_fs_static)
-    if(WL2_BUILD_EXAMPLES)
-        add_subdirectory(
-            "${PROJECT_SOURCE_DIR}/examples/js/fs-inspect"
-            "${CMAKE_BINARY_DIR}/examples/js/fs-inspect")
-    endif()
     wl2_add_module_tests(wl2_fs)
 endif()

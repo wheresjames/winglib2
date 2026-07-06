@@ -47,6 +47,45 @@ if(WL2_BUILD_TESTING)
             runtime-arg-2)
     set_tests_properties(scripts.wl2_runtime_smoke PROPERTIES
         LABELS "js;runtime;smoke")
+    add_test(NAME scripts.wl2_dynamic_build_tree_modules
+        COMMAND
+            ${CMAKE_COMMAND}
+            -DWL2_EXECUTABLE=$<TARGET_FILE:wl2>
+            -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/test/dynamic_build_tree_modules
+            -DBUILD_MODULE_DIR=${CMAKE_BINARY_DIR}/lib/wl2/modules
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/test/scripts/expect_dynamic_build_tree_modules.cmake)
+    set_tests_properties(scripts.wl2_dynamic_build_tree_modules PROPERTIES
+        LABELS "js;modules;dynamic"
+        TIMEOUT 15)
+    # WL2_MODULE_PATH / --module-path resolves a module from an explicit
+    # directory even under project-only policy, and is reported by module graph.
+    add_test(NAME scripts.wl2_module_path
+        COMMAND
+            ${CMAKE_COMMAND}
+            -DWL2_EXECUTABLE=$<TARGET_FILE:wl2>
+            -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/test/module_path
+            -DBUILD_MODULE_DIR=${CMAKE_BINARY_DIR}/lib/wl2/modules
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/test/scripts/expect_module_path.cmake)
+    set_tests_properties(scripts.wl2_module_path PROPERTIES
+        LABELS "cli;modules;dynamic"
+        TIMEOUT 30)
+    if(WL2_BUILD_SHARED_MODULES)
+        # Installs to a throwaway prefix and proves the installed bin/wl2
+        # resolves manifest-required modules from its installed store, survives
+        # prefix relocation, and rejects tampered payloads.
+        add_test(NAME scripts.wl2_installed_tree_modules
+            COMMAND
+                ${CMAKE_COMMAND}
+                -DCMAKE_COMMAND_PATH=${CMAKE_COMMAND}
+                -DMAIN_BUILD_DIR=${CMAKE_BINARY_DIR}
+                -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/test/installed_tree_modules
+                -DINSTALL_LIBDIR=${CMAKE_INSTALL_LIBDIR}
+                -DBUILD_TYPE=$<CONFIG>
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/test/scripts/expect_installed_tree_modules.cmake)
+        set_tests_properties(scripts.wl2_installed_tree_modules PROPERTIES
+            LABELS "install;modules;dynamic"
+            TIMEOUT 300)
+    endif()
     add_test(NAME scripts.wl2_cli_version
         COMMAND
             $<TARGET_FILE:wl2>
@@ -309,6 +348,41 @@ if(WL2_BUILD_TESTING)
         set_tests_properties(outoftree.deps_build PROPERTIES
             LABELS "outoftree;modules;deps;cmake"
             TIMEOUT 360)
+        # Linkage-mode matrix: build a minimal wl2 in each non-default linkage
+        # and prove its module path (builtin for static, staged store with no
+        # builtin fallback for dynamic). The default 'both' linkage is what the
+        # main build itself exercises.
+        foreach(_wl2_linkage_mode static dynamic)
+            add_test(NAME outoftree.linkage_${_wl2_linkage_mode}
+                COMMAND
+                    ${CMAKE_COMMAND}
+                    -DCMAKE_COMMAND_PATH=${CMAKE_COMMAND}
+                    -DMAIN_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+                    -DWORK_DIR=${CMAKE_BINARY_DIR}/test/outoftree/linkage_${_wl2_linkage_mode}
+                    -DGENERATOR=${CMAKE_GENERATOR}
+                    -DBUILD_TYPE=$<CONFIG>
+                    -DLINKAGE=${_wl2_linkage_mode}
+                    -P ${CMAKE_CURRENT_SOURCE_DIR}/test/outoftree/run_linkage_mode.cmake)
+            set_tests_properties(outoftree.linkage_${_wl2_linkage_mode} PROPERTIES
+                LABELS "outoftree;modules;linkage;cmake"
+                TIMEOUT 900)
+        endforeach()
+        # Runner module-mode (dynamic-with-static-fallback): builds a minimal wl2
+        # that links the full static registry AND stages the dynamic store, then
+        # proves dynamic-first loading, static fallback when the dynamic payload
+        # is removed, and that --no-builtin-module-fallback disables the fallback.
+        add_test(NAME outoftree.module_mode
+            COMMAND
+                ${CMAKE_COMMAND}
+                -DCMAKE_COMMAND_PATH=${CMAKE_COMMAND}
+                -DMAIN_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+                -DWORK_DIR=${CMAKE_BINARY_DIR}/test/outoftree/module_mode
+                -DGENERATOR=${CMAKE_GENERATOR}
+                -DBUILD_TYPE=$<CONFIG>
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/test/outoftree/run_module_mode.cmake)
+        set_tests_properties(outoftree.module_mode PROPERTIES
+            LABELS "outoftree;modules;linkage;cmake"
+            TIMEOUT 900)
         add_test(NAME outoftree.extended_module
             COMMAND
                 ${CMAKE_COMMAND}
@@ -323,7 +397,11 @@ if(WL2_BUILD_TESTING)
             TIMEOUT 360)
     endif()
 
-    if(TARGET wl2_3d_static AND TARGET wl2_slint_static AND TARGET wl2_membus_static)
+    # morph3d runs through the wl2 runner, which loads these modules dynamically
+    # from the staged store or statically from builtin registration.
+    if((TARGET wl2_3d_static OR TARGET wl2_3d)
+            AND (TARGET wl2_slint_static OR TARGET wl2_slint)
+            AND (TARGET wl2_membus_static OR TARGET wl2_membus))
         add_test(NAME scripts.wl2_3d_morph3d_compile
             COMMAND
                 $<TARGET_FILE:wl2>

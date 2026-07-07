@@ -37,8 +37,10 @@
 #include <vector>
 
 #if defined(_WIN32)
+#include <conio.h>
 #include <io.h>
 #else
+#include <termios.h>
 #include <unistd.h>
 #endif
 
@@ -469,6 +471,55 @@ bool stdin_is_terminal() {
 #else
     return isatty(fileno(stdin)) != 0;
 #endif
+}
+
+std::optional<std::string> read_terminal_choice() {
+#if defined(_WIN32)
+    const int ch = _getch();
+    if (ch == EOF) {
+        return std::nullopt;
+    }
+    const char c = static_cast<char>(ch);
+    std::cerr << c << '\n';
+    return std::string(1, c);
+#else
+    const int fd = fileno(stdin);
+    termios original{};
+    if (tcgetattr(fd, &original) != 0) {
+        return std::nullopt;
+    }
+
+    termios raw = original;
+    raw.c_lflag &= static_cast<tcflag_t>(~(ICANON | ECHO));
+    raw.c_cc[VMIN] = 1;
+    raw.c_cc[VTIME] = 0;
+    if (tcsetattr(fd, TCSANOW, &raw) != 0) {
+        return std::nullopt;
+    }
+
+    char c = '\0';
+    const auto n = ::read(fd, &c, 1);
+    tcsetattr(fd, TCSANOW, &original);
+    if (n != 1) {
+        return std::nullopt;
+    }
+    std::cerr << c << '\n';
+    return std::string(1, c);
+#endif
+}
+
+std::optional<std::string> read_prompt_answer() {
+    if (stdin_is_terminal()) {
+        if (auto answer = read_terminal_choice()) {
+            return answer;
+        }
+    }
+
+    std::string answer;
+    if (!std::getline(std::cin, answer)) {
+        return std::nullopt;
+    }
+    return answer;
 }
 
 bool should_print_details(StackTraceMode mode, const wl2::Error& error) {
@@ -1102,11 +1153,11 @@ bool approve_declared_permissions(RunCommand& command) {
     std::cerr << (deltaPrompt
             ? "Allow these additional permissions? [y]es / [a]lways / [n]o "
             : "Allow these permissions? [y]es / [a]lways / [n]o ");
-    std::string answer;
-    if (!std::getline(std::cin, answer)) {
+    auto maybeAnswer = read_prompt_answer();
+    if (!maybeAnswer) {
         return false;
     }
-    answer = trim_text(answer);
+    std::string answer = trim_text(*maybeAnswer);
     if (answer == "a" || answer == "A" || answer == "always" || answer == "ALWAYS") {
         if (!identity) {
             std::cerr << "cannot persist declared permission approval for "

@@ -633,7 +633,6 @@ std::string js_payload(JSContext* ctx, JSValueConst value) {
             return out;
         }
     }
-    JS_FreeValue(ctx, arrayBuffer);
 #endif
 
     if (JS_IsString(value)) {

@@ -68,6 +68,45 @@ message(STATUS " [-] CMAKE_CXX_FLAGS_RELEASE=${CMAKE_CXX_FLAGS_RELEASE}")
 message(STATUS " [-] CMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}")
 message(STATUS " [-] CMAKE_CXX_STANDARD=${CMAKE_CXX_STANDARD}")
 
+#-------------------------------------------------------------
+# Compiler cache (ccache)
+#
+# The test suite builds winglib2 from scratch several times: the out-of-tree
+# module, linkage, and packaging tests each configure this same project into a
+# throwaway build tree and recompile the identical core sources (notably the
+# large quickjs.c translation unit). ccache turns those repeated compiles into
+# cache hits, which is by far the biggest lever on total test time.
+#
+# Enabling it here means every one of those nested builds inherits the launcher
+# automatically, since they all configure MAIN_SOURCE_DIR. A wrapper pins the
+# settings that let a single cache be shared across the distinct build trees:
+# CCACHE_NOHASHDIR keeps the differing build-directory paths (baked into
+# RelWithDebInfo debug info) out of the hash, which would otherwise force a miss
+# for every object in every separate tree.
+option(WL2_USE_CCACHE "Accelerate compilation with ccache when it is available" ON)
+if(WL2_USE_CCACHE AND NOT CMAKE_CXX_COMPILER_LAUNCHER AND NOT CMAKE_C_COMPILER_LAUNCHER)
+    find_program(WL2_CCACHE_PROGRAM ccache)
+    if(WL2_CCACHE_PROGRAM)
+        if(CMAKE_HOST_UNIX)
+            set(_wl2_ccache_launcher "${CMAKE_BINARY_DIR}/wl2-ccache-launcher.sh")
+            file(WRITE "${_wl2_ccache_launcher}"
+                "#!/bin/sh\n"
+                "export CCACHE_NOHASHDIR=1\n"
+                "export CCACHE_SLOPPINESS=time_macros,include_file_mtime,include_file_ctime,pch_defines\n"
+                "exec \"${WL2_CCACHE_PROGRAM}\" \"$@\"\n")
+            file(CHMOD "${_wl2_ccache_launcher}"
+                PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+        else()
+            set(_wl2_ccache_launcher "${WL2_CCACHE_PROGRAM}")
+        endif()
+        set(CMAKE_C_COMPILER_LAUNCHER "${_wl2_ccache_launcher}" CACHE STRING "" FORCE)
+        set(CMAKE_CXX_COMPILER_LAUNCHER "${_wl2_ccache_launcher}" CACHE STRING "" FORCE)
+        message(STATUS " [-] ccache enabled: ${WL2_CCACHE_PROGRAM}")
+    else()
+        message(STATUS " [-] ccache not found; compiling without a compiler cache")
+    endif()
+endif()
+
 
 #-------------------------------------------------------------
 # Build setup: install paths, C++ standard, and project options

@@ -24,7 +24,9 @@ bool endpoint_matches(const std::string& entry, const std::string& host, const s
     const std::string entryHost = entry.substr(0, colon);
     const std::string entryPort = entry.substr(colon + 1);
     const bool hostOk = entryHost == "*" || entryHost == host;
-    const bool portOk = entryPort == "*" || portText == "*" || entryPort == portText;
+    // A request for "*" (all ports) is only covered by an approval that also
+    // spans all ports; it must not be satisfied by a specific-port approval.
+    const bool portOk = entryPort == "*" || (portText != "*" && entryPort == portText);
     return hostOk && portOk;
 }
 

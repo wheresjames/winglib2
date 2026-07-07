@@ -1,5 +1,6 @@
 #include "internal.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <sstream>
@@ -1208,6 +1209,191 @@ JSValue gst_rtsp_playback_fn(JSContext* ctx, JSValueConst, int argc, JSValueCons
     return throw_gst_error(ctx, "gstreamer_unsupported", "rtspPlayback",
         "This build lacks gstreamer-app-1.0; RTSP helpers are unavailable");
 #endif
+}
+
+namespace {
+
+std::vector<std::string> required_elements_for_uri_text(const std::string& uri) {
+    std::vector<std::string> out;
+    auto starts = [&](const char* prefix) { return uri.rfind(prefix, 0) == 0; };
+    if (starts("rtsp://") || starts("rtsps://")) {
+        out.push_back("rtspsrc");
+    } else if (starts("srt://")) {
+        out.push_back("srtsrc");
+    } else if (starts("rist://")) {
+        out.push_back("ristsrc");
+        out.push_back("rtpmp2tdepay");
+        out.push_back("tsdemux");
+    } else if (starts("rtmp://") || starts("rtmps://")) {
+        out.push_back("rtmpsrc");
+    } else if (starts("http://") || starts("https://")) {
+        if (uri.find(".m3u8") != std::string::npos) {
+            out.push_back("souphttpsrc");
+            out.push_back("hlsdemux");
+        } else if (uri.find(".mpd") != std::string::npos) {
+            out.push_back("souphttpsrc");
+            out.push_back("dashdemux");
+        } else if (uri.find("mjpeg") != std::string::npos) {
+            out.push_back("souphttpsrc");
+            out.push_back("multipartdemux");
+            out.push_back("jpegparse");
+            out.push_back("jpegdec");
+        } else {
+            out.push_back("souphttpsrc");
+        }
+    } else if (starts("file://")) {
+        out.push_back("filesrc");
+    }
+    out.push_back("decodebin");
+    return out;
+}
+
+JSValue string_array(JSContext* ctx, const std::vector<std::string>& values) {
+    JSValue array = JS_NewArray(ctx);
+    uint32_t index = 0;
+    for (const auto& value : values) {
+        JS_SetPropertyUint32(ctx, array, index++, JS_NewString(ctx, value.c_str()));
+    }
+    return array;
+}
+
+JSValue required_result(JSContext* ctx, const std::vector<std::string>& required) {
+    std::vector<std::string> missing;
+    for (const auto& name : required) {
+        if (!element_exists(name.c_str())) {
+            missing.push_back(name);
+        }
+    }
+    JSValue obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, obj, "requiredElements", string_array(ctx, required));
+    JS_SetPropertyStr(ctx, obj, "missingElements", string_array(ctx, missing));
+    JS_SetPropertyStr(ctx, obj, "ok", JS_NewBool(ctx, missing.empty()));
+    return obj;
+}
+
+std::string source_option(JSContext* ctx, JSValueConst options) {
+    std::string source;
+    if (!option_string(ctx, options, "source", source) || source.empty()) {
+        source = "videotestsrc is-live=true pattern=ball";
+    }
+    return source;
+}
+
+std::string h264_head(JSContext* ctx, JSValueConst options) {
+    int64_t width = 640;
+    int64_t height = 360;
+    int64_t fps = 30;
+    option_int(ctx, options, "width", width);
+    option_int(ctx, options, "height", height);
+    option_int(ctx, options, "fps", fps);
+    std::ostringstream launch;
+    launch << source_option(ctx, options)
+           << " ! queue ! videoconvert ! videoscale ! videorate ! video/x-raw,width="
+           << width << ",height=" << height << ",framerate=" << fps
+           << "/1 ! x264enc tune=zerolatency speed-preset=ultrafast key-int-max=30 ! video/x-h264,profile=baseline";
+    return launch.str();
+}
+
+JSValue launch_result(JSContext* ctx, const std::string& launch, const std::string& url,
+    const std::vector<std::string>& required) {
+    JSValue obj = required_result(ctx, required);
+    JS_SetPropertyStr(ctx, obj, "launch", JS_NewString(ctx, launch.c_str()));
+    JS_SetPropertyStr(ctx, obj, "url", JS_NewString(ctx, url.c_str()));
+    return obj;
+}
+
+} // namespace
+
+JSValue gst_required_elements_for_uri_fn(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    if (argc < 1 || !JS_IsString(argv[0])) {
+        return throw_gst_error(ctx, "gstreamer_invalid_argument", "requiredElementsForUri",
+            "requiredElementsForUri(uri) requires a URI string");
+    }
+    const char* text = JS_ToCString(ctx, argv[0]);
+    if (!text) return JS_EXCEPTION;
+    std::string uri = text;
+    JS_FreeCString(ctx, text);
+    return string_array(ctx, required_elements_for_uri_text(uri));
+}
+
+JSValue gst_can_decode_uri_fn(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    if (argc < 1 || !JS_IsString(argv[0])) {
+        return throw_gst_error(ctx, "gstreamer_invalid_argument", "canDecodeUri",
+            "canDecodeUri(uri) requires a URI string");
+    }
+    const char* text = JS_ToCString(ctx, argv[0]);
+    if (!text) return JS_EXCEPTION;
+    std::string uri = text;
+    JS_FreeCString(ctx, text);
+    return required_result(ctx, required_elements_for_uri_text(uri));
+}
+
+JSValue gst_build_hls_output_fn(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    const char* operation = "buildHlsOutput";
+    if (argc < 1 || !JS_IsObject(argv[0])) {
+        return throw_gst_error(ctx, "gstreamer_invalid_argument", operation, "buildHlsOutput(options) requires an object");
+    }
+    std::string outDir;
+    if (!require_string_option(ctx, argv[0], "outDir", operation, outDir)) return JS_EXCEPTION;
+    std::string url;
+    option_string(ctx, argv[0], "url", url);
+    if (url.empty()) url = "http://127.0.0.1:8080/hls/stream.m3u8";
+    int64_t segmentSeconds = 2;
+    int64_t playlistLength = 5;
+    int64_t maxFiles = 10;
+    option_int(ctx, argv[0], "segmentSeconds", segmentSeconds);
+    option_int(ctx, argv[0], "playlistLength", playlistLength);
+    option_int(ctx, argv[0], "maxFiles", maxFiles);
+    segmentSeconds = std::clamp<int64_t>(segmentSeconds, 1, 30);
+    playlistLength = std::clamp<int64_t>(playlistLength, 2, 120);
+    maxFiles = std::clamp<int64_t>(std::max(maxFiles, playlistLength), playlistLength, 240);
+    std::ostringstream launch;
+    launch << h264_head(ctx, argv[0])
+           << " ! mpegtsmux ! hlssink location=" << launch_quote(outDir + "/seg_%05d.ts")
+           << " playlist-location=" << launch_quote(outDir + "/stream.m3u8")
+           << " target-duration=" << segmentSeconds
+           << " max-files=" << maxFiles
+           << " playlist-length=" << playlistLength;
+    return launch_result(ctx, launch.str(), url, {"x264enc", "mpegtsmux", "hlssink"});
+}
+
+JSValue gst_build_dash_output_fn(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    const char* operation = "buildDashOutput";
+    if (argc < 1 || !JS_IsObject(argv[0])) {
+        return throw_gst_error(ctx, "gstreamer_invalid_argument", operation, "buildDashOutput(options) requires an object");
+    }
+    std::string outDir;
+    if (!require_string_option(ctx, argv[0], "outDir", operation, outDir)) return JS_EXCEPTION;
+    std::string url;
+    option_string(ctx, argv[0], "url", url);
+    if (url.empty()) url = "http://127.0.0.1:8080/dash/stream.mpd";
+    int64_t segmentSeconds = 2;
+    option_int(ctx, argv[0], "segmentSeconds", segmentSeconds);
+    segmentSeconds = std::clamp<int64_t>(segmentSeconds, 1, 30);
+    std::ostringstream launch;
+    launch << h264_head(ctx, argv[0])
+           << " ! dashsink mpd-filename=stream.mpd mpd-root-path=" << launch_quote(outDir)
+           << " target-duration=" << segmentSeconds << " dynamic=true";
+    return launch_result(ctx, launch.str(), url, {"x264enc", "dashsink"});
+}
+
+JSValue gst_build_srt_output_fn(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    const char* operation = "buildSrtOutput";
+    if (argc < 1 || !JS_IsObject(argv[0])) {
+        return throw_gst_error(ctx, "gstreamer_invalid_argument", operation, "buildSrtOutput(options) requires an object");
+    }
+    int64_t port = 7001;
+    option_int(ctx, argv[0], "port", port);
+    std::string host = "0.0.0.0";
+    option_string(ctx, argv[0], "host", host);
+    std::string publicHost = "127.0.0.1";
+    option_string(ctx, argv[0], "publicHost", publicHost);
+    std::ostringstream launch;
+    launch << h264_head(ctx, argv[0])
+           << " ! mpegtsmux ! srtsink uri="
+           << launch_quote("srt://" + host + ":" + std::to_string(port) + "?mode=listener");
+    std::string url = "srt://" + publicHost + ":" + std::to_string(port);
+    return launch_result(ctx, launch.str(), url, {"x264enc", "mpegtsmux", "srtsink"});
 }
 
 } // namespace wl2_gstreamer

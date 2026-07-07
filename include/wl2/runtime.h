@@ -39,6 +39,7 @@ struct PermissionSet {
     std::vector<std::string> listen;
     std::vector<std::string> sharedMemory;
     std::vector<std::filesystem::path> filesystemRead;
+    std::vector<std::filesystem::path> filesystemWrite;
     bool ui = false;
     bool graphics = false;
 };
@@ -109,6 +110,15 @@ struct RuntimeOptions {
     /// true. Paths outside every root are denied. An empty list denies all
     /// `wl2:fs` reads even when allowFilesystemReads is true.
     std::vector<std::filesystem::path> filesystemReadRoots;
+
+    /// Allow scripts to write the host filesystem through write-capable modules.
+    /// Disabled by default. Even when enabled, writes are confined to
+    /// filesystemWriteRoots. This is intentionally separate from read access.
+    bool allowFilesystemWrites = false;
+
+    /// Writable roots that modules may create/update/delete under when
+    /// allowFilesystemWrites is true. An empty list denies all writes.
+    std::vector<std::filesystem::path> filesystemWriteRoots;
 
     /// Allow modules to open outbound network connections. Disabled by default.
     /// Even when enabled, only endpoints matching networkAllowList are permitted.
@@ -254,6 +264,20 @@ public:
         const std::filesystem::path& requested) const;
 
     /**
+     * @brief Authorize and normalize a filesystem write path against policy.
+     *
+     * Resolves @p requested (symlinks and `..` included for existing parents)
+     * and confirms it is contained by one of the configured write roots. This is
+     * the policy gate write-capable filesystem modules consult.
+     *
+     * @param requested Filesystem path requested by a script.
+     * @return The resolved absolute path when permitted, or std::nullopt when
+     * filesystem writes are disabled or the path escapes every write root.
+     */
+    std::optional<std::filesystem::path> resolveFilesystemWritePath(
+        const std::filesystem::path& requested) const;
+
+    /**
      * @brief Authorize an outbound network connection against policy.
      *
      * Network access is denied by default. It is permitted when
@@ -393,10 +417,12 @@ private:
     mutable std::vector<std::string> interactiveNetworkAllowList_;
     mutable std::vector<std::string> interactiveListenAllowList_;
     mutable std::vector<std::filesystem::path> interactiveFilesystemReadRoots_;
+    mutable std::vector<std::filesystem::path> interactiveFilesystemWriteRoots_;
     mutable std::vector<std::string> dynamicSharedMemoryAllowList_;
     mutable std::vector<std::string> dynamicNetworkAllowList_;
     mutable std::vector<std::string> dynamicListenAllowList_;
     mutable std::vector<std::filesystem::path> dynamicFilesystemReadRoots_;
+    mutable std::vector<std::filesystem::path> dynamicFilesystemWriteRoots_;
     mutable bool dynamicUiAllowed_ = false;
     mutable bool dynamicGraphicsAllowed_ = false;
 };

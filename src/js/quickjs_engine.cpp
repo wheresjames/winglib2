@@ -1236,6 +1236,13 @@ bool permission_set_from_js(JSContext* ctx, JSValueConst value, PermissionSet& o
     for (const auto& root : roots) {
         out.filesystemRead.emplace_back(root);
     }
+    roots.clear();
+    if (!read_permission_string_array(ctx, value, "filesystemWrite", roots)) {
+        return false;
+    }
+    for (const auto& root : roots) {
+        out.filesystemWrite.emplace_back(root);
+    }
     return read_permission_bool(ctx, value, "ui", out.ui) &&
         read_permission_bool(ctx, value, "graphics", out.graphics);
 }
@@ -1266,6 +1273,7 @@ JSValue permission_result_object(JSContext* ctx, bool granted, const PermissionS
     JS_SetPropertyStr(ctx, obj, "listen", permission_string_array(ctx, effective.listen));
     JS_SetPropertyStr(ctx, obj, "sharedMemory", permission_string_array(ctx, effective.sharedMemory));
     JS_SetPropertyStr(ctx, obj, "filesystemRead", permission_path_array(ctx, effective.filesystemRead));
+    JS_SetPropertyStr(ctx, obj, "filesystemWrite", permission_path_array(ctx, effective.filesystemWrite));
     JS_SetPropertyStr(ctx, obj, "ui", JS_NewBool(ctx, effective.ui));
     JS_SetPropertyStr(ctx, obj, "graphics", JS_NewBool(ctx, effective.graphics));
     if (!error.empty()) {
@@ -1738,6 +1746,18 @@ public:
                     }
                 }
             }
+        }
+        // A top-level module promise still pending after the event loop found
+        // no runnable work and no outstanding native operations is a stalled
+        // script (for example an await on a promise nothing can ever settle).
+        // Exiting 0 here would silently mask the bug.
+        if ((!cancel || !cancel->load(std::memory_order_relaxed)) && is_thenable(ctx, result)
+            && JS_PromiseState(ctx, result) == JS_PROMISE_PENDING) {
+            JS_FreeValue(ctx, result);
+            JS_FreeContext(ctx);
+            JS_FreeRuntime(rt);
+            return Error("quickjs_module_stalled",
+                "Top-level await never settled: no pending jobs or native operations remain");
         }
         if (is_thenable(ctx, result)) {
             if (JS_PromiseState(ctx, result) == JS_PROMISE_REJECTED) {

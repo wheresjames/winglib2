@@ -8,6 +8,28 @@ namespace wl2_gstreamer {
 
 JSClassID g_pipelineClassId = 0;
 
+// Stop callback delivery for the current watch. JS thread only: the callback
+// slots are freed here while any still-queued completions (also JS thread)
+// see active=false / a bumped generation and drop their message instead.
+void deactivate_bus_watch(PipelineBox* box) {
+    auto& slot = box->busWatch;
+    if (!slot || !slot->active) {
+        return;
+    }
+    slot->active = false;
+    slot->generation.fetch_add(1);
+    JSContext* ctx = slot->ctx;
+    JS_FreeValue(ctx, slot->onMessage);
+    JS_FreeValue(ctx, slot->onError);
+    JS_FreeValue(ctx, slot->onWarning);
+    JS_FreeValue(ctx, slot->onEos);
+    slot->onMessage = JS_UNDEFINED;
+    slot->onError = JS_UNDEFINED;
+    slot->onWarning = JS_UNDEFINED;
+    slot->onEos = JS_UNDEFINED;
+    slot->runtime->async().endOperation();
+}
+
 void close_pipeline(PipelineBox* box) {
     if (!box || box->closed) {
         return;
@@ -20,6 +42,16 @@ void close_pipeline(PipelineBox* box) {
     if (box->pipeline) {
         gst_element_set_state(box->pipeline, GST_STATE_NULL);
         gst_element_get_state(box->pipeline, nullptr, nullptr, GST_CLOCK_TIME_NONE);
+    }
+    if (box->busWatch) {
+        deactivate_bus_watch(box);
+        // Removing the sync handler destroys its user data; this is only safe
+        // now that the NULL-state wait above has joined every streaming thread
+        // that could still be inside gst_bus_post().
+        if (box->bus) {
+            gst_bus_set_sync_handler(box->bus, nullptr, nullptr, nullptr);
+        }
+        box->busWatch.reset();
     }
     box->bridges.clear();
     if (box->bus) {
@@ -295,6 +327,151 @@ JSValue pipeline_bus_poll(JSContext* ctx, JSValueConst thisVal, int argc, JSValu
         gst_message_unref(message);
     }
     return array;
+}
+
+// --- Push-style bus watching -------------------------------------------------
+
+// Runs on the JS thread: route one forwarded bus message to the watch callbacks.
+void dispatch_bus_message(const std::shared_ptr<BusWatchSlot>& slot, GstMessage* message, uint64_t generation) {
+    if (!slot->active || slot->generation != generation) {
+        gst_message_unref(message);
+        return;
+    }
+    JSContext* ctx = slot->ctx;
+    const GstMessageType type = GST_MESSAGE_TYPE(message);
+    JSValue msg = message_to_js(ctx, message);
+    gst_message_unref(message);
+
+    // Dup the matched callbacks first: a callback may call unwatchBus()/close(),
+    // which frees the slot's values while we are still fanning out.
+    JSValue callbacks[2];
+    int count = 0;
+    JSValue typed = JS_UNDEFINED;
+    if (type == GST_MESSAGE_ERROR) {
+        typed = slot->onError;
+    } else if (type == GST_MESSAGE_WARNING) {
+        typed = slot->onWarning;
+    } else if (type == GST_MESSAGE_EOS) {
+        typed = slot->onEos;
+    }
+    if (JS_IsFunction(ctx, typed)) {
+        callbacks[count++] = JS_DupValue(ctx, typed);
+    }
+    if (JS_IsFunction(ctx, slot->onMessage)) {
+        callbacks[count++] = JS_DupValue(ctx, slot->onMessage);
+    }
+    for (int i = 0; i < count; ++i) {
+        JSValue result = JS_Call(ctx, callbacks[i], JS_UNDEFINED, 1, &msg);
+        if (JS_IsException(result)) {
+            // A throwing watch callback must not take down the drain loop; the
+            // exception is swallowed like the websocket handlers do.
+            JSValue exc = JS_GetException(ctx);
+            JS_FreeValue(ctx, exc);
+        }
+        JS_FreeValue(ctx, result);
+        JS_FreeValue(ctx, callbacks[i]);
+    }
+    JS_FreeValue(ctx, msg);
+}
+
+// GstBus sync handler: called by GStreamer on the thread that posts the
+// message. Never touches JS state — it refs the message and forwards it to the
+// JS thread. While a watch is active every message is consumed here (so the
+// bus queue cannot grow unbounded); busPoll() sees messages again after
+// unwatchBus().
+GstBusSyncReply bus_sync_handler(GstBus*, GstMessage* message, gpointer userData) {
+    const auto& slot = *static_cast<std::shared_ptr<BusWatchSlot>*>(userData);
+    if (!slot->active) {
+        return GST_BUS_PASS;
+    }
+    gst_message_ref(message);
+    const uint64_t generation = slot->generation;
+    slot->runtime->async().post([slot, message, generation] {
+        dispatch_bus_message(slot, message, generation);
+    });
+    return GST_BUS_DROP;
+}
+
+void destroy_bus_watch_user_data(gpointer userData) {
+    delete static_cast<std::shared_ptr<BusWatchSlot>*>(userData);
+}
+
+// Fetch an options callback: a function is dup'd and returned, anything else
+// (including absent) yields JS_UNDEFINED.
+JSValue watch_callback(JSContext* ctx, JSValueConst options, const char* key) {
+    JSValue value = JS_GetPropertyStr(ctx, options, key);
+    if (JS_IsFunction(ctx, value)) {
+        return value;
+    }
+    JS_FreeValue(ctx, value);
+    return JS_UNDEFINED;
+}
+
+JSValue pipeline_watch_bus(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv) {
+    PipelineBox* box = live_pipeline(ctx, thisVal, "watchBus");
+    if (!box) {
+        return JS_EXCEPTION;
+    }
+    if (!box->bus) {
+        return throw_gst_error(ctx, "gstreamer_invalid_state", "watchBus", "Pipeline has no bus");
+    }
+    wl2::Runtime* runtime = current_runtime(ctx);
+    if (!runtime) {
+        return JS_ThrowInternalError(ctx, "Runtime is unavailable");
+    }
+    if (argc < 1 || !JS_IsObject(argv[0])) {
+        return throw_gst_error(ctx, "gstreamer_invalid_argument", "watchBus",
+            "watchBus({ onMessage?, onError?, onWarning?, onEos? }) requires an options object");
+    }
+    if (box->busWatch && box->busWatch->active) {
+        return throw_gst_error(ctx, "gstreamer_invalid_state", "watchBus",
+            "A bus watch is already active; call unwatchBus() first");
+    }
+    JSValue onMessage = watch_callback(ctx, argv[0], "onMessage");
+    JSValue onError = watch_callback(ctx, argv[0], "onError");
+    JSValue onWarning = watch_callback(ctx, argv[0], "onWarning");
+    JSValue onEos = watch_callback(ctx, argv[0], "onEos");
+    if (JS_IsUndefined(onMessage) && JS_IsUndefined(onError) && JS_IsUndefined(onWarning) && JS_IsUndefined(onEos)) {
+        return throw_gst_error(ctx, "gstreamer_invalid_argument", "watchBus",
+            "watchBus requires at least one of onMessage, onError, onWarning, onEos");
+    }
+
+    const bool install = !box->busWatch;
+    if (install) {
+        box->busWatch = std::make_shared<BusWatchSlot>();
+    }
+    auto& slot = box->busWatch;
+    slot->runtime = runtime;
+    slot->ctx = ctx;
+    slot->onMessage = onMessage;
+    slot->onError = onError;
+    slot->onWarning = onWarning;
+    slot->onEos = onEos;
+    slot->generation.fetch_add(1);
+    // Like a timer, an active watch holds one outstanding operation so the
+    // event loop keeps draining callbacks until unwatchBus()/close().
+    runtime->async().beginOperation();
+    slot->active = true;
+    if (install) {
+        gst_bus_set_sync_handler(box->bus, bus_sync_handler,
+            new std::shared_ptr<BusWatchSlot>(slot), destroy_bus_watch_user_data);
+    }
+    JSValue obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, obj, "ok", JS_NewBool(ctx, true));
+    return obj;
+}
+
+JSValue pipeline_unwatch_bus(JSContext* ctx, JSValueConst thisVal, int, JSValueConst*) {
+    // Mirrors close(): valid on an already-closed pipeline, where the watch is
+    // already gone.
+    auto* box = static_cast<PipelineBox*>(JS_GetOpaque2(ctx, thisVal, g_pipelineClassId));
+    if (!box) {
+        return JS_ThrowTypeError(ctx, "unwatchBus() called on a non-pipeline");
+    }
+    deactivate_bus_watch(box);
+    JSValue obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, obj, "ok", JS_NewBool(ctx, true));
+    return obj;
 }
 
 JSValue pipeline_close(JSContext* ctx, JSValueConst thisVal, int, JSValueConst*) {

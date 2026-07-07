@@ -54,6 +54,8 @@ int run_fs_tests() {
     wl2::RuntimeOptions options;
     options.allowFilesystemReads = true;
     options.filesystemReadRoots = {root};
+    options.allowFilesystemWrites = true;
+    options.filesystemWriteRoots = {root};
     options.staticModules.push_back(wl2_fs_register_module);
 
     wl2::Runtime runtime{std::move(options)};
@@ -66,7 +68,7 @@ int run_fs_tests() {
 
     const std::string rootLiteral = (root).generic_string();
     const std::string source = std::string(R"JS(
-import { readText, readBytes, exists, stat, list, walk } from "wl2:fs";
+import { readText, readBytes, writeText, writeBytes, mkdir, remove, mkdtemp, exists, stat, list, walk } from "wl2:fs";
 
 const root = ")JS") + rootLiteral + "\";\n"
         + "const dirLinkOk = " + (dirLinkOk ? "true" : "false") + ";\n"
@@ -141,6 +143,31 @@ assert(missingErr.module === "wl2_fs" && missingErr.operation === "readText", "e
 let notFileBlocked = false;
 try { readText(root + "/sub"); } catch (e) { notFileBlocked = e.code === "fs_not_a_file"; }
 assert(notFileBlocked, "reading a directory should be fs_not_a_file");
+
+// Write APIs are gated separately from reads and can create parent directories.
+writeText(root + "/created/text.txt", "created\n");
+assert(readText(root + "/created/text.txt") === "created\n", "writeText round trip failed");
+
+const payload = new Uint8Array([9, 8, 7, 6]);
+const writeResult = writeBytes(root + "/created/data.bin", payload);
+assert(writeResult.bytesWritten === 4, "writeBytes byte count wrong");
+assert(readBytes(root + "/created/data.bin").byteLength === 4, "writeBytes round trip length failed");
+
+mkdir(root + "/created/deep/path", { recursive: true });
+assert(stat(root + "/created/deep/path").isDirectory, "mkdir recursive failed");
+
+const tempA = mkdtemp(root + "/tmp-");
+const tempB = mkdtemp(root + "/tmp-");
+assert(tempA !== tempB, "mkdtemp should create unique directories");
+assert(stat(tempA).isDirectory && stat(tempB).isDirectory, "mkdtemp dirs missing");
+
+const removed = remove(root + "/created", { recursive: true });
+assert(removed.removed > 0, "remove recursive should remove entries");
+assert(exists(root + "/created") === false, "remove recursive left directory");
+
+let writeOutsideBlocked = false;
+try { writeText(root + "/../write-escape.txt", "nope"); } catch (e) { writeOutsideBlocked = e.code === "fs_permission_denied"; }
+assert(writeOutsideBlocked, "writing outside the root should be denied");
 )JS";
 
     auto result = engine->runModule(runtime, "wl2-fs-test.js", source);

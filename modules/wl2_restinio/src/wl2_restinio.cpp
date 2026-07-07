@@ -66,12 +66,26 @@ return a response object or a Promise of one.
   new HttpServer({ host?, port?, maxBodyBytes? })
     .route(method, path, handler)   handler(req) -> response | Promise<response>
                                     path supports :params and * wildcards
+    .static(mount, root, options?)  serve files from root; options supports
+                                    mimeTypes and cacheControl
+    .routeStream(method, path, handler)  handler(req, stream) drives a
+                                    long-lived chunked response (e.g. MJPEG,
+                                    server-sent events)
     .listen() -> Promise<{ host, port }>   (gated by listen permission)
     .close()  -> Promise<void>
 
   req      = { method, url, path, query, params, headers, body, remoteAddr }
   response = { status?, headers?, body? } | string
              body may be a string or ArrayBuffer/TypedArray
+
+  stream   (routeStream handler argument)
+    .respond({ status?, headers? }) -> Promise<void>   send the head once
+    .write(data) -> Promise<boolean>  chunk written (await = backpressure);
+                                      false once the client is gone
+    .close() -> Promise<void>         finish the response (idempotent)
+    .onClose(cb)                      cb fires once when the stream ends
+    .closed                           boolean
+  The stream is finished automatically when the handler's promise settles.
 
 Errors use the shared HttpError shape with stable http_* codes.)";
 
@@ -221,6 +235,44 @@ bool get_int_prop(JSContext* ctx, JSValueConst obj, const char* name, int64_t& o
     return true;
 }
 
+std::map<std::string, std::string> get_string_map_prop(JSContext* ctx, JSValueConst obj, const char* name) {
+    std::map<std::string, std::string> out;
+    JSValue value = JS_GetPropertyStr(ctx, obj, name);
+    if (JS_IsUndefined(value) || JS_IsNull(value) || !JS_IsObject(value)) {
+        JS_FreeValue(ctx, value);
+        return out;
+    }
+    JSPropertyEnum* props = nullptr;
+    uint32_t count = 0;
+    if (JS_GetOwnPropertyNames(ctx, &props, &count, value, JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) < 0) {
+        JS_FreeValue(ctx, value);
+        return out;
+    }
+    for (uint32_t i = 0; i < count; ++i) {
+        const char* key = JS_AtomToCString(ctx, props[i].atom);
+        JSValue prop = JS_GetProperty(ctx, value, props[i].atom);
+        const char* val = JS_ToCString(ctx, prop);
+        if (key && val) {
+            std::string k = key;
+            for (char& c : k) {
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            }
+            out.emplace(std::move(k), val);
+        }
+        if (val) {
+            JS_FreeCString(ctx, val);
+        }
+        JS_FreeValue(ctx, prop);
+        if (key) {
+            JS_FreeCString(ctx, key);
+        }
+        JS_FreeAtom(ctx, props[i].atom);
+    }
+    js_free(ctx, props);
+    JS_FreeValue(ctx, value);
+    return out;
+}
+
 // Extract bytes from a string, ArrayBuffer, or TypedArray into out.
 bool extract_bytes(JSContext* ctx, JSValueConst value, std::string& out) {
     if (JS_IsString(value)) {
@@ -290,9 +342,12 @@ struct RouteDef {
     std::vector<std::string> paramNames; // :name tokens, for named-param lookup.
     JSValue handler = JS_UNDEFINED;       // owned (dup'd); freed on close/finalize.
     bool isStatic = false;                // static file mount rather than a JS handler.
+    bool isStream = false;                // streaming route: handler(req, stream).
     bool isWebSocket = false;
     std::string staticRoot;               // filesystem root for a static mount.
     std::string staticMount;              // URL prefix for a static mount.
+    std::map<std::string, std::string> staticMimeOverrides;
+    std::string staticCacheControl;
     JSValue wsOnOpen = JS_UNDEFINED;
     JSValue wsOnMessage = JS_UNDEFINED;
     JSValue wsOnClose = JS_UNDEFINED;
@@ -301,6 +356,7 @@ struct RouteDef {
 };
 
 struct WsConnection;
+struct StreamConnection;
 
 struct ServerHandle {
     JSContext* ctx = nullptr;
@@ -320,6 +376,8 @@ struct ServerHandle {
     std::string keyPassword;
     std::mutex wsMutex;
     std::map<restinio::connection_id_t, std::shared_ptr<WsConnection>> websockets;
+    std::mutex streamsMutex;
+    std::map<restinio::connection_id_t, std::shared_ptr<StreamConnection>> streams;
 #if WL2_HTTP_TLS
     std::unique_ptr<https_server_t> tlsServer;
 #endif
@@ -336,6 +394,95 @@ struct WsConnection {
     std::mutex mutex;
 };
 
+const char* default_reason(uint16_t status);
+
+// One long-lived streaming response (routeStream). The RESTinio response
+// builder (`resp`) is created and used exclusively on the io thread; the JS
+// thread posts write/close work to it and receives completions back through
+// Runtime::async(). `onClose` is owned and freed on the JS thread only.
+using chunked_response_t = restinio::response_builder_t<restinio::chunked_output_t>;
+
+struct StreamConnection {
+    std::weak_ptr<ServerHandle> server;
+    restinio::request_handle_t req;                 // io thread use only.
+    std::unique_ptr<chunked_response_t> resp;       // io thread use only.
+    restinio::connection_id_t id = 0;
+    JSContext* ctx = nullptr;
+    wl2::Runtime* runtime = nullptr;
+    JSValue onClose = JS_UNDEFINED;                 // JS thread only.
+    std::atomic<bool> closed{false};
+    std::atomic<bool> responded{false};
+    std::atomic<bool> cleanupPosted{false};
+    // One async operation is held while the stream is open so the event loop
+    // keeps the process alive; released exactly once via aliveHeld.
+    std::atomic<bool> aliveHeld{false};
+    std::mutex mutex;                               // guards bufferedBytes.
+    std::size_t bufferedBytes = 0;
+    std::size_t maxBufferedBytes = kDefaultMaxBodyBytes * 4u;
+};
+
+void stream_remove_from_server(const std::shared_ptr<StreamConnection>& conn) {
+    if (auto server = conn->server.lock()) {
+        std::lock_guard<std::mutex> lock(server->streamsMutex);
+        server->streams.erase(conn->id);
+    }
+}
+
+// Runs on the JS thread, exactly once per stream (cleanupPosted gates the
+// post): fire the onClose callback, release the callback value, and release
+// the stream's keep-alive operation.
+void finish_stream_on_js(const std::shared_ptr<StreamConnection>& conn) {
+    if (JS_IsFunction(conn->ctx, conn->onClose)) {
+        JSValue cb = conn->onClose;
+        conn->onClose = JS_UNDEFINED;
+        JSValue result = JS_Call(conn->ctx, cb, JS_UNDEFINED, 0, nullptr);
+        if (JS_IsException(result)) {
+            JSValue exc = JS_GetException(conn->ctx);
+            JS_FreeValue(conn->ctx, exc);
+        }
+        JS_FreeValue(conn->ctx, result);
+        JS_FreeValue(conn->ctx, cb);
+    } else {
+        JS_FreeValue(conn->ctx, conn->onClose);
+        conn->onClose = JS_UNDEFINED;
+    }
+    if (conn->aliveHeld.exchange(false)) {
+        conn->runtime->async().endOperation();
+    }
+}
+
+// Mark the stream closed and schedule the JS-side cleanup once. Callable from
+// either thread.
+void stream_mark_closed(const std::shared_ptr<StreamConnection>& conn) {
+    conn->closed = true;
+    if (!conn->cleanupPosted.exchange(true)) {
+        conn->runtime->async().post([conn] { finish_stream_on_js(conn); });
+    }
+}
+
+// Finish the response on the io thread: complete the chunked body, or send a
+// bare status when the handler never called respond(). Safe to call multiple
+// times (resp is consumed on the first call).
+void stream_finish_on_io(const std::shared_ptr<StreamConnection>& conn, uint16_t fallbackStatus,
+    const std::string& fallbackBody) {
+    try {
+        if (conn->resp) {
+            std::unique_ptr<chunked_response_t> resp = std::move(conn->resp);
+            resp->done();
+        } else if (!conn->responded.exchange(true)) {
+            auto resp = conn->req->create_response(restinio::http_status_line_t{
+                restinio::http_status_code_t{fallbackStatus}, default_reason(fallbackStatus)});
+            resp.append_header(restinio::http_field::content_type, "text/plain; charset=utf-8");
+            resp.set_body(fallbackBody);
+            resp.done();
+        }
+    } catch (...) {
+        // Connection already gone.
+    }
+    stream_remove_from_server(conn);
+    stream_mark_closed(conn);
+}
+
 // Open/close whichever concrete server (plaintext or TLS) a handle owns. These
 // run on the io thread. open_sync throws on failure (e.g. bind error).
 void open_server(ServerHandle& h) {
@@ -349,6 +496,21 @@ void open_server(ServerHandle& h) {
 }
 
 void close_server(ServerHandle& h) {
+    // Finish active streaming responses first (runs on the io thread, so the
+    // response builders may be used directly).
+    std::vector<std::shared_ptr<StreamConnection>> streams;
+    {
+        std::lock_guard<std::mutex> lock(h.streamsMutex);
+        for (auto& [id, conn] : h.streams) {
+            (void)id;
+            streams.push_back(conn);
+        }
+        h.streams.clear();
+    }
+    for (auto& conn : streams) {
+        stream_finish_on_io(conn, 503, "server closing");
+    }
+
     std::vector<std::shared_ptr<WsConnection>> conns;
     {
         std::lock_guard<std::mutex> lock(h.wsMutex);
@@ -394,9 +556,12 @@ struct Incoming {
     std::vector<std::pair<std::string, std::string>> params;
     JSValue handler = JS_UNDEFINED; // borrowed from ServerHandle.
     bool isStatic = false;
+    bool isStream = false;
     bool acceptsGzip = false;
     std::string staticRoot;
     std::string staticMount;
+    std::map<std::string, std::string> staticMimeOverrides;
+    std::string staticCacheControl;
     // Parsed multipart/form-data parts (name, filename, contentType, data).
     struct FilePart {
         std::string name;
@@ -416,6 +581,7 @@ struct Pending {
 
 JSClassID http_server_class_id = 0;
 JSClassID ws_connection_class_id = 0;
+JSClassID http_stream_class_id = 0;
 
 struct ServerBox {
     std::shared_ptr<ServerHandle> handle;
@@ -423,6 +589,10 @@ struct ServerBox {
 
 struct WsBox {
     std::shared_ptr<WsConnection> conn;
+};
+
+struct StreamBox {
+    std::shared_ptr<StreamConnection> conn;
 };
 
 void free_routes(JSContext* ctx, ServerHandle& h) {
@@ -456,6 +626,16 @@ void ws_connection_finalizer(JSRuntime*, JSValue val) {
 
 std::shared_ptr<WsConnection> get_ws_connection(JSContext* ctx, JSValueConst value) {
     auto* box = static_cast<WsBox*>(JS_GetOpaque2(ctx, value, ws_connection_class_id));
+    return box ? box->conn : nullptr;
+}
+
+void http_stream_finalizer(JSRuntime*, JSValue val) {
+    auto* box = static_cast<StreamBox*>(JS_GetOpaque(val, http_stream_class_id));
+    delete box;
+}
+
+std::shared_ptr<StreamConnection> get_stream(JSContext* ctx, JSValueConst value) {
+    auto* box = static_cast<StreamBox*>(JS_GetOpaque2(ctx, value, http_stream_class_id));
     return box ? box->conn : nullptr;
 }
 
@@ -780,6 +960,243 @@ JSValue ws_message_text_cb(JSContext* ctx, JSValueConst, int argc, JSValueConst*
     return JS_DupValue(ctx, data[0]);
 }
 
+// --- Streaming responses (routeStream) --------------------------------------
+
+// stream.respond({ status?, headers? }) — send the response head once. The
+// body is delivered chunk-by-chunk through write() until close().
+JSValue http_stream_respond(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv) {
+    auto conn = get_stream(ctx, thisVal);
+    if (!conn) {
+        return JS_ThrowTypeError(ctx, "respond() called on a non-stream");
+    }
+    if (conn->closed) {
+        return rejected_promise(ctx, conn->runtime, throw_http_error(ctx, "http_closed", "stream.respond", "stream is closed"));
+    }
+    if (conn->responded.exchange(true)) {
+        return rejected_promise(ctx, conn->runtime,
+            throw_http_error(ctx, "http_invalid_argument", "stream.respond", "respond() may only be called once"));
+    }
+    uint16_t status = 200;
+    std::vector<std::pair<std::string, std::string>> headers;
+    if (argc > 0 && JS_IsObject(argv[0])) {
+        int64_t s = 0;
+        if (get_int_prop(ctx, argv[0], "status", s) && s >= 100 && s <= 599) {
+            status = static_cast<uint16_t>(s);
+        }
+        JSValue headerObj = JS_GetPropertyStr(ctx, argv[0], "headers");
+        if (JS_IsObject(headerObj)) {
+            JSPropertyEnum* props = nullptr;
+            uint32_t count = 0;
+            if (JS_GetOwnPropertyNames(ctx, &props, &count, headerObj, JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) == 0) {
+                for (uint32_t i = 0; i < count; ++i) {
+                    const char* key = JS_AtomToCString(ctx, props[i].atom);
+                    JSValue hv = JS_GetProperty(ctx, headerObj, props[i].atom);
+                    const char* val = JS_ToCString(ctx, hv);
+                    if (key && val) {
+                        headers.emplace_back(key, val);
+                    }
+                    if (key) {
+                        JS_FreeCString(ctx, key);
+                    }
+                    if (val) {
+                        JS_FreeCString(ctx, val);
+                    }
+                    JS_FreeValue(ctx, hv);
+                    JS_FreeAtom(ctx, props[i].atom);
+                }
+                js_free(ctx, props);
+            }
+        }
+        JS_FreeValue(ctx, headerObj);
+    }
+
+    std::shared_ptr<Promise> promise;
+    JSValue jsPromise = make_promise(ctx, conn->runtime, promise);
+    if (JS_IsException(jsPromise)) {
+        return jsPromise;
+    }
+    conn->runtime->async().beginOperation();
+    asio_ns::post(ensure_io(), [conn, promise, status, headers = std::move(headers)] {
+        try {
+            std::string reason = default_reason(status);
+            auto builder = conn->req->create_response<restinio::chunked_output_t>(
+                restinio::http_status_line_t{restinio::http_status_code_t{status}, std::move(reason)});
+            bool haveContentType = false;
+            for (const auto& [k, v] : headers) {
+                builder.append_header(k, v);
+                if (iequals(k, "content-type")) {
+                    haveContentType = true;
+                }
+            }
+            if (!haveContentType) {
+                builder.append_header(restinio::http_field::content_type, "application/octet-stream");
+            }
+            conn->resp = std::make_unique<chunked_response_t>(std::move(builder));
+            conn->resp->flush([conn, promise](const asio_ns::error_code& ec) {
+                const bool ok = !ec;
+                if (!ok) {
+                    stream_mark_closed(conn);
+                    stream_remove_from_server(conn);
+                }
+                promise->runtime->async().post([promise, ok] {
+                    if (ok) {
+                        settle_value(promise, JS_UNDEFINED);
+                    } else {
+                        settle_error(promise, throw_http_error(promise->ctx, "http_closed", "stream.respond",
+                            "client disconnected before the response head was written"));
+                    }
+                    promise->runtime->async().endOperation();
+                });
+            });
+        } catch (const std::exception& e) {
+            stream_mark_closed(conn);
+            stream_remove_from_server(conn);
+            std::string message = e.what();
+            promise->runtime->async().post([promise, message] {
+                settle_error(promise, throw_http_error(promise->ctx, "http_closed", "stream.respond", message));
+                promise->runtime->async().endOperation();
+            });
+        }
+    });
+    return jsPromise;
+}
+
+// stream.write(data) -> Promise<boolean>. Resolves true once the chunk was
+// written to the socket (this is the backpressure signal — await it), false
+// when the client is gone. Unawaited writes are bounded by maxBufferedBytes;
+// exceeding the bound closes the stream.
+JSValue http_stream_write(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv) {
+    auto conn = get_stream(ctx, thisVal);
+    if (!conn) {
+        return JS_ThrowTypeError(ctx, "write() called on a non-stream");
+    }
+    if (!conn->responded) {
+        return rejected_promise(ctx, conn->runtime,
+            throw_http_error(ctx, "http_invalid_argument", "stream.write", "respond() must be called before write()"));
+    }
+    std::string payload;
+    if (argc < 1 || !extract_bytes(ctx, argv[0], payload)) {
+        return rejected_promise(ctx, conn->runtime,
+            throw_http_error(ctx, "http_invalid_argument", "stream.write", "data must be a string or buffer"));
+    }
+
+    std::shared_ptr<Promise> promise;
+    JSValue jsPromise = make_promise(ctx, conn->runtime, promise);
+    if (JS_IsException(jsPromise)) {
+        return jsPromise;
+    }
+    if (conn->closed || payload.empty()) {
+        settle_value(promise, JS_NewBool(ctx, !conn->closed));
+        return jsPromise;
+    }
+    const std::size_t size = payload.size();
+    {
+        std::lock_guard<std::mutex> lock(conn->mutex);
+        if (conn->bufferedBytes + size > conn->maxBufferedBytes) {
+            // The producer is far ahead of the client; treat it like a dead
+            // client rather than buffering without bound.
+            stream_mark_closed(conn);
+            asio_ns::post(ensure_io(), [conn] { stream_finish_on_io(conn, 500, "stream overflow"); });
+            settle_value(promise, JS_NewBool(ctx, false));
+            return jsPromise;
+        }
+        conn->bufferedBytes += size;
+    }
+    conn->runtime->async().beginOperation();
+    asio_ns::post(ensure_io(), [conn, promise, payload = std::move(payload), size]() mutable {
+        auto settle = [conn, promise, size](bool ok) {
+            {
+                std::lock_guard<std::mutex> lock(conn->mutex);
+                conn->bufferedBytes = conn->bufferedBytes > size ? conn->bufferedBytes - size : 0;
+            }
+            if (!ok) {
+                stream_mark_closed(conn);
+                stream_remove_from_server(conn);
+            }
+            promise->runtime->async().post([promise, ok] {
+                settle_value(promise, JS_NewBool(promise->ctx, ok));
+                promise->runtime->async().endOperation();
+            });
+        };
+        if (conn->closed || !conn->resp) {
+            settle(false);
+            return;
+        }
+        try {
+            conn->resp->append_chunk(restinio::writable_item_t{std::move(payload)});
+            conn->resp->flush([settle](const asio_ns::error_code& ec) { settle(!ec); });
+        } catch (...) {
+            settle(false);
+        }
+    });
+    return jsPromise;
+}
+
+// stream.close() — finish the chunked body (or send a bare 204 when respond()
+// was never called) and release the stream. Idempotent.
+JSValue http_stream_close(JSContext* ctx, JSValueConst thisVal, int, JSValueConst*) {
+    auto conn = get_stream(ctx, thisVal);
+    if (!conn) {
+        return JS_ThrowTypeError(ctx, "close() called on a non-stream");
+    }
+    std::shared_ptr<Promise> promise;
+    JSValue jsPromise = make_promise(ctx, conn->runtime, promise);
+    if (JS_IsException(jsPromise)) {
+        return jsPromise;
+    }
+    if (conn->closed.exchange(true)) {
+        settle_value(promise, JS_UNDEFINED);
+        return jsPromise;
+    }
+    conn->runtime->async().beginOperation();
+    asio_ns::post(ensure_io(), [conn, promise] {
+        stream_finish_on_io(conn, 204, "");
+        promise->runtime->async().post([promise] {
+            settle_value(promise, JS_UNDEFINED);
+            promise->runtime->async().endOperation();
+        });
+    });
+    return jsPromise;
+}
+
+// stream.onClose(cb) — cb fires once, on the JS thread, when the stream ends
+// for any reason (client disconnect, overflow, server close, or local close).
+JSValue http_stream_on_close(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv) {
+    auto conn = get_stream(ctx, thisVal);
+    if (!conn) {
+        return JS_ThrowTypeError(ctx, "onClose() called on a non-stream");
+    }
+    if (argc < 1 || !JS_IsFunction(ctx, argv[0])) {
+        return JS_Throw(ctx, throw_http_error(ctx, "http_invalid_argument", "stream.onClose", "onClose(cb) requires a function"));
+    }
+    JS_FreeValue(ctx, conn->onClose);
+    conn->onClose = JS_DupValue(ctx, argv[0]);
+    if (conn->closed && conn->cleanupPosted) {
+        // Already ended; deliver the notification anyway so late registration
+        // is not silently lost.
+        auto connCopy = conn;
+        conn->runtime->async().post([connCopy] { finish_stream_on_js(connCopy); });
+    }
+    return JS_UNDEFINED;
+}
+
+JSValue http_stream_closed_get(JSContext* ctx, JSValueConst thisVal, int, JSValueConst*) {
+    auto conn = get_stream(ctx, thisVal);
+    if (!conn) {
+        return JS_ThrowTypeError(ctx, "closed read on a non-stream");
+    }
+    return JS_NewBool(ctx, conn->closed.load());
+}
+
+JSValue make_stream_object(JSContext* ctx, const std::shared_ptr<StreamConnection>& conn) {
+    JSValue obj = JS_NewObjectClass(ctx, http_stream_class_id);
+    if (JS_IsException(obj)) {
+        return obj;
+    }
+    JS_SetOpaque(obj, new StreamBox{conn});
+    return obj;
+}
+
 // --- Static file serving --------------------------------------------------
 
 // Percent-decode a URL path segment ('+' is left as-is; it is a space only in
@@ -838,6 +1255,35 @@ const char* mime_type(const std::string& path) {
     return "application/octet-stream";
 }
 
+std::string extension_key(const std::string& path) {
+    std::size_t dot = path.rfind('.');
+    if (dot == std::string::npos) {
+        return {};
+    }
+    std::string ext = path.substr(dot);
+    for (char& c : ext) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return ext;
+}
+
+std::string static_content_type(const Incoming& in, const std::string& path) {
+    const std::string ext = extension_key(path);
+    if (!ext.empty()) {
+        auto it = in.staticMimeOverrides.find(ext);
+        if (it != in.staticMimeOverrides.end()) {
+            return it->second;
+        }
+        if (ext.front() == '.') {
+            auto bare = in.staticMimeOverrides.find(ext.substr(1));
+            if (bare != in.staticMimeOverrides.end()) {
+                return bare->second;
+            }
+        }
+    }
+    return mime_type(path);
+}
+
 // Serve a file for a static mount. Runs on the JS thread so the runtime's
 // filesystem-read policy can be consulted; small assets only (read into memory).
 void serve_static(const std::shared_ptr<ServerHandle>& handle, const restinio::request_handle_t& req,
@@ -889,7 +1335,10 @@ void serve_static(const std::shared_ptr<ServerHandle>& handle, const restinio::r
     contents << file.rdbuf();
     out.status = 200;
     out.body = contents.str();
-    out.headers.emplace_back("content-type", mime_type(resolved->string()));
+    out.headers.emplace_back("content-type", static_content_type(*in, resolved->string()));
+    if (!in->staticCacheControl.empty()) {
+        out.headers.emplace_back("cache-control", in->staticCacheControl);
+    }
     deliver(handle, req, out);
 }
 
@@ -1031,6 +1480,92 @@ void attach_settlement(JSContext* ctx, Pending* pr, JSValue result) {
     JS_FreeValue(ctx, global);
 }
 
+// Handler settlement for streaming routes: when the handler's promise settles,
+// finish the stream if the handler left it open (a rejected handler that never
+// responded yields a 500).
+struct StreamPending {
+    std::shared_ptr<StreamConnection> conn;
+};
+
+JSValue stream_settlement_cb(JSContext* ctx, JSValueConst, int, JSValueConst*, int magic, JSValue* data) {
+    int64_t ptr = 0;
+    JS_ToInt64(ctx, &ptr, data[0]);
+    auto* pending = reinterpret_cast<StreamPending*>(static_cast<intptr_t>(ptr));
+    auto conn = pending->conn;
+    delete pending;
+    if (!conn->closed.exchange(true)) {
+        const uint16_t fallbackStatus = magic == 0 ? 204 : 500;
+        const std::string fallbackBody = magic == 0 ? "" : "handler failed";
+        asio_ns::post(ensure_io(), [conn, fallbackStatus, fallbackBody] {
+            stream_finish_on_io(conn, fallbackStatus, fallbackBody);
+        });
+    }
+    return JS_UNDEFINED;
+}
+
+void attach_stream_settlement(JSContext* ctx, const std::shared_ptr<StreamConnection>& conn, JSValue result) {
+    auto* pending = new StreamPending{conn};
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue promiseCtor = JS_GetPropertyStr(ctx, global, "Promise");
+    JSValue resolveFn = JS_GetPropertyStr(ctx, promiseCtor, "resolve");
+    JSValue args[] = {result};
+    JSValue promise = JS_Call(ctx, resolveFn, promiseCtor, 1, args);
+    JS_FreeValue(ctx, resolveFn);
+
+    JSValue data = JS_NewInt64(ctx, static_cast<int64_t>(reinterpret_cast<intptr_t>(pending)));
+    JSValue onDone = JS_NewCFunctionData(ctx, stream_settlement_cb, 1, 0, 1, &data);
+    JSValue onFail = JS_NewCFunctionData(ctx, stream_settlement_cb, 1, 1, 1, &data);
+    JS_FreeValue(ctx, data);
+
+    JSValue thenFn = JS_GetPropertyStr(ctx, promise, "then");
+    JSValue thenArgs[] = {onDone, onFail};
+    JSValue chained = JS_Call(ctx, thenFn, promise, 2, thenArgs);
+    JS_FreeValue(ctx, chained);
+    JS_FreeValue(ctx, thenFn);
+    JS_FreeValue(ctx, onDone);
+    JS_FreeValue(ctx, onFail);
+    JS_FreeValue(ctx, promise);
+    JS_FreeValue(ctx, promiseCtor);
+    JS_FreeValue(ctx, global);
+}
+
+// Streaming route dispatch on the JS thread: build the stream object, invoke
+// handler(req, stream), and tie stream teardown to the handler's settlement.
+// The async operation begun by the io-thread route handler is adopted by the
+// stream (aliveHeld) and released when the stream finishes.
+void dispatch_stream_on_js(const std::shared_ptr<ServerHandle>& handle, const restinio::request_handle_t& req,
+    const std::shared_ptr<Incoming>& in) {
+    JSContext* ctx = handle->ctx;
+    auto conn = std::make_shared<StreamConnection>();
+    conn->server = handle;
+    conn->req = req;
+    conn->id = req->connection_id();
+    conn->ctx = ctx;
+    conn->runtime = handle->runtime;
+    conn->aliveHeld = true;
+    {
+        std::lock_guard<std::mutex> lock(handle->streamsMutex);
+        handle->streams.emplace(conn->id, conn);
+    }
+    JSValue reqObj = build_request_object(ctx, *in);
+    JSValue streamObj = make_stream_object(ctx, conn);
+    JSValue args[] = {reqObj, streamObj};
+    JSValue result = JS_Call(ctx, in->handler, JS_UNDEFINED, 2, args);
+    JS_FreeValue(ctx, reqObj);
+    JS_FreeValue(ctx, streamObj);
+    if (JS_IsException(result)) {
+        JS_FreeValue(ctx, result);
+        JSValue exc = JS_GetException(ctx);
+        JS_FreeValue(ctx, exc);
+        if (!conn->closed.exchange(true)) {
+            asio_ns::post(ensure_io(), [conn] { stream_finish_on_io(conn, 500, "handler failed"); });
+        }
+        return;
+    }
+    attach_stream_settlement(ctx, conn, result);
+    JS_FreeValue(ctx, result);
+}
+
 void dispatch_on_js(const std::shared_ptr<ServerHandle>& handle, const restinio::request_handle_t& req, const std::shared_ptr<Incoming>& in) {
     JSContext* ctx = handle->ctx;
     if (handle->closed) {
@@ -1039,6 +1574,10 @@ void dispatch_on_js(const std::shared_ptr<ServerHandle>& handle, const restinio:
     }
     if (in->isStatic) {
         serve_static(handle, req, in);
+        return;
+    }
+    if (in->isStream) {
+        dispatch_stream_on_js(handle, req, in);
         return;
     }
     JSValue reqObj = build_request_object(ctx, *in);
@@ -1267,8 +1806,11 @@ express_handler_t make_route_handler(const std::shared_ptr<ServerHandle>& handle
         in->method = def.method;
         in->handler = def.handler;
         in->isStatic = def.isStatic;
+        in->isStream = def.isStream;
         in->staticRoot = def.staticRoot;
         in->staticMount = def.staticMount;
+        in->staticMimeOverrides = def.staticMimeOverrides;
+        in->staticCacheControl = def.staticCacheControl;
 
         std::string target{req->header().request_target()};
         std::size_t q = target.find('?');
@@ -1387,6 +1929,46 @@ JSValue http_server_route(JSContext* ctx, JSValueConst thisVal, int argc, JSValu
     return JS_DupValue(ctx, thisVal); // chainable
 }
 
+// routeStream(method, path, handler) — handler(req, stream) drives a long-lived
+// chunked response through the stream object instead of returning a body.
+JSValue http_server_route_stream(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv) {
+    auto handle = get_server(ctx, thisVal);
+    if (!handle) {
+        return JS_ThrowTypeError(ctx, "routeStream() called on a non-server");
+    }
+    if (handle->listening) {
+        return JS_Throw(ctx, throw_http_error(ctx, "http_invalid_argument", "routeStream", "routes must be added before listen()"));
+    }
+    if (argc < 3 || !JS_IsString(argv[0]) || !JS_IsString(argv[1]) || !JS_IsFunction(ctx, argv[2])) {
+        return JS_Throw(ctx, throw_http_error(ctx, "http_invalid_argument", "routeStream", "routeStream(method, path, handler) requires a method, path, and function"));
+    }
+    std::string method;
+    std::string path;
+    {
+        const char* m = JS_ToCString(ctx, argv[0]);
+        const char* p = JS_ToCString(ctx, argv[1]);
+        if (m) {
+            method = m;
+            JS_FreeCString(ctx, m);
+        }
+        if (p) {
+            path = p;
+            JS_FreeCString(ctx, p);
+        }
+    }
+    for (char& c : method) {
+        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    }
+    RouteDef def;
+    def.method = method;
+    def.path = path;
+    def.paramNames = parse_param_names(path);
+    def.handler = JS_DupValue(ctx, argv[2]);
+    def.isStream = true;
+    handle->routes.push_back(std::move(def));
+    return JS_DupValue(ctx, thisVal); // chainable
+}
+
 JSValue http_server_static(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv) {
     auto handle = get_server(ctx, thisVal);
     if (!handle) {
@@ -1396,7 +1978,7 @@ JSValue http_server_static(JSContext* ctx, JSValueConst thisVal, int argc, JSVal
         return JS_Throw(ctx, throw_http_error(ctx, "http_invalid_argument", "static", "static mounts must be added before listen()"));
     }
     if (argc < 2 || !JS_IsString(argv[0]) || !JS_IsString(argv[1])) {
-        return JS_Throw(ctx, throw_http_error(ctx, "http_invalid_argument", "static", "static(mount, root) requires a mount path and a root directory"));
+        return JS_Throw(ctx, throw_http_error(ctx, "http_invalid_argument", "static", "static(mount, root, options?) requires a mount path and a root directory"));
     }
     std::string mount;
     std::string root;
@@ -1418,11 +2000,32 @@ JSValue http_server_static(JSContext* ctx, JSValueConst thisVal, int argc, JSVal
     while (mount.size() > 1 && mount.back() == '/') {
         mount.pop_back();
     }
+    auto* runtime = static_cast<wl2::Runtime*>(JS_GetContextOpaque(ctx));
+    if (!runtime) {
+        return JS_Throw(ctx, throw_http_error(ctx, "http_invalid_argument", "static", "runtime unavailable"));
+    }
+    auto resolvedRoot = runtime->resolveFilesystemReadPath(root);
+    if (!resolvedRoot) {
+        return JS_Throw(ctx, throw_http_error(ctx, "http_permission_denied", "static",
+            "filesystem read permission denied for static root: " + root));
+    }
+    std::error_code ec;
+    if (!std::filesystem::is_directory(*resolvedRoot, ec)) {
+        return JS_Throw(ctx, throw_http_error(ctx, "http_not_found", "static",
+            "static root does not exist or is not a directory: " + resolvedRoot->string()));
+    }
     RouteDef def;
     def.method = "GET";
     def.isStatic = true;
     def.staticMount = mount;
-    def.staticRoot = root;
+    def.staticRoot = resolvedRoot->string();
+    if (argc >= 3 && JS_IsObject(argv[2])) {
+        def.staticMimeOverrides = get_string_map_prop(ctx, argv[2], "mimeTypes");
+        if (def.staticMimeOverrides.empty()) {
+            def.staticMimeOverrides = get_string_map_prop(ctx, argv[2], "mime");
+        }
+        get_string_prop(ctx, argv[2], "cacheControl", def.staticCacheControl);
+    }
     // RESTinio express wildcard is a named regex group, not a bare '*'.
     def.path = mount + "/:wl2path(.*)"; // matches everything under the mount.
     handle->routes.push_back(std::move(def));
@@ -1690,6 +2293,7 @@ void register_server_class(JSContext* ctx) {
     }
     JSValue proto = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, proto, "route", JS_NewCFunction(ctx, http_server_route, "route", 3));
+    JS_SetPropertyStr(ctx, proto, "routeStream", JS_NewCFunction(ctx, http_server_route_stream, "routeStream", 3));
     JS_SetPropertyStr(ctx, proto, "static", JS_NewCFunction(ctx, http_server_static, "static", 2));
     JS_SetPropertyStr(ctx, proto, "ws", JS_NewCFunction(ctx, http_server_ws, "ws", 2));
     JS_SetPropertyStr(ctx, proto, "listen", JS_NewCFunction(ctx, http_server_listen, "listen", 0));
@@ -1709,6 +2313,26 @@ void register_server_class(JSContext* ctx) {
     JS_SetPropertyStr(ctx, wsProto, "send", JS_NewCFunction(ctx, ws_connection_send, "send", 2));
     JS_SetPropertyStr(ctx, wsProto, "close", JS_NewCFunction(ctx, ws_connection_close, "close", 2));
     JS_SetClassProto(ctx, ws_connection_class_id, wsProto);
+
+    if (http_stream_class_id == 0) {
+        JS_NewClassID(&http_stream_class_id);
+    }
+    if (!JS_IsRegisteredClass(rt, http_stream_class_id)) {
+        JSClassDef def{};
+        def.class_name = "HttpStream";
+        def.finalizer = http_stream_finalizer;
+        JS_NewClass(rt, http_stream_class_id, &def);
+    }
+    JSValue streamProto = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, streamProto, "respond", JS_NewCFunction(ctx, http_stream_respond, "respond", 1));
+    JS_SetPropertyStr(ctx, streamProto, "write", JS_NewCFunction(ctx, http_stream_write, "write", 1));
+    JS_SetPropertyStr(ctx, streamProto, "close", JS_NewCFunction(ctx, http_stream_close, "close", 0));
+    JS_SetPropertyStr(ctx, streamProto, "onClose", JS_NewCFunction(ctx, http_stream_on_close, "onClose", 1));
+    JSAtom closedAtom = JS_NewAtom(ctx, "closed");
+    JSValue closedGetter = JS_NewCFunction(ctx, http_stream_closed_get, "closed", 0);
+    JS_DefinePropertyGetSet(ctx, streamProto, closedAtom, closedGetter, JS_UNDEFINED, 0);
+    JS_FreeAtom(ctx, closedAtom);
+    JS_SetClassProto(ctx, http_stream_class_id, streamProto);
 }
 
 int init_http_module(JSContext* ctx, JSModuleDef* module) {

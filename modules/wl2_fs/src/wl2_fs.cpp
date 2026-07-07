@@ -3,6 +3,7 @@
 #include "wl2/runtime.h"
 
 #include <cstdint>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -30,6 +31,11 @@ constexpr const char* FsApi = R"(Exports JavaScript module wl2:fs.
 Functions:
   readText(path)   -> string
   readBytes(path)  -> wl2.Buffer
+  writeText(path, text) -> { ok, path, bytesWritten }
+  writeBytes(path, data) -> { ok, path, bytesWritten }
+  mkdir(path, { recursive? }) -> { ok, path }
+  remove(path, { recursive? }) -> { ok, path, removed }
+  mkdtemp(prefix) -> string
   exists(path)     -> boolean
   stat(path)       -> { path, exists, isFile, isDirectory, isSymlink, size }
   list(path)       -> [ { name, isFile, isDirectory, isSymlink, size } ]
@@ -39,7 +45,8 @@ Security model:
   Reads are disabled unless the host enables RuntimeOptions.allowFilesystemReads.
   Even when enabled, access is confined to RuntimeOptions.filesystemReadRoots.
   Paths are host filesystem paths, not wl2: resource specifiers.
-  This module is read-only; it provides no write or delete operations.)";
+  Writes are disabled unless the host enables RuntimeOptions.allowFilesystemWrites.
+  Even when enabled, writes are confined to RuntimeOptions.filesystemWriteRoots.)";
 
 #if WL2_HAVE_QUICKJS
 
@@ -95,6 +102,75 @@ std::optional<fs::path> authorize(JSContext* ctx, const char* operation, const s
         return std::nullopt;
     }
     return resolved;
+}
+
+std::optional<fs::path> authorize_write(JSContext* ctx, const char* operation, const std::string& requested) {
+    wl2::Runtime* runtime = current_runtime(ctx);
+    if (!runtime) {
+        JS_ThrowInternalError(ctx, "Runtime is unavailable");
+        return std::nullopt;
+    }
+    auto resolved = runtime->resolveFilesystemWritePath(requested);
+    if (!resolved) {
+        throw_fs_error(ctx, "fs_permission_denied", operation, requested,
+            "Filesystem write is not permitted for this path");
+        return std::nullopt;
+    }
+    return resolved;
+}
+
+bool get_bool_option(JSContext* ctx, JSValueConst obj, const char* name, bool fallback) {
+    if (!JS_IsObject(obj)) {
+        return fallback;
+    }
+    JSValue value = JS_GetPropertyStr(ctx, obj, name);
+    if (JS_IsUndefined(value) || JS_IsNull(value)) {
+        JS_FreeValue(ctx, value);
+        return fallback;
+    }
+    bool out = JS_ToBool(ctx, value) != 0;
+    JS_FreeValue(ctx, value);
+    return out;
+}
+
+JSValue ok_path_object(JSContext* ctx, const fs::path& path) {
+    JSValue obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, obj, "ok", JS_NewBool(ctx, true));
+    JS_SetPropertyStr(ctx, obj, "path", JS_NewString(ctx, path.string().c_str()));
+    return obj;
+}
+
+bool extract_bytes(JSContext* ctx, JSValueConst value, std::string& out) {
+    if (JS_IsString(value)) {
+        size_t len = 0;
+        const char* s = JS_ToCStringLen(ctx, &len, value);
+        if (!s) return false;
+        out.assign(s, len);
+        JS_FreeCString(ctx, s);
+        return true;
+    }
+    size_t size = 0;
+    uint8_t* ptr = JS_GetArrayBuffer(ctx, &size, value);
+    if (ptr) {
+        out.assign(reinterpret_cast<char*>(ptr), size);
+        return true;
+    }
+    size_t byteOffset = 0;
+    size_t byteLength = 0;
+    size_t bytesPerElement = 0;
+    JSValue buffer = JS_GetTypedArrayBuffer(ctx, value, &byteOffset, &byteLength, &bytesPerElement);
+    if (!JS_IsException(buffer)) {
+        size_t bufSize = 0;
+        uint8_t* base = JS_GetArrayBuffer(ctx, &bufSize, buffer);
+        bool ok = false;
+        if (base && byteOffset + byteLength <= bufSize) {
+            out.assign(reinterpret_cast<char*>(base + byteOffset), byteLength);
+            ok = true;
+        }
+        JS_FreeValue(ctx, buffer);
+        return ok;
+    }
+    return false;
 }
 
 JSValue make_wl2_buffer(JSContext* ctx, const std::string& bytes) {
@@ -220,6 +296,132 @@ JSValue fs_read_bytes(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv
     return make_wl2_buffer(ctx, contents);
 }
 
+JSValue fs_write_text(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    std::string requested;
+    if (!read_path_argument(ctx, "writeText", argc, argv, requested)) {
+        return JS_EXCEPTION;
+    }
+    if (argc < 2 || !JS_IsString(argv[1])) {
+        return throw_fs_error(ctx, "fs_invalid_argument", "writeText", requested,
+            "writeText(path, text) requires a text string");
+    }
+    auto resolved = authorize_write(ctx, "writeText", requested);
+    if (!resolved) return JS_EXCEPTION;
+    size_t len = 0;
+    const char* text = JS_ToCStringLen(ctx, &len, argv[1]);
+    if (!text) return JS_EXCEPTION;
+    std::error_code ec;
+    fs::create_directories(resolved->parent_path(), ec);
+    if (ec) {
+        JS_FreeCString(ctx, text);
+        return throw_fs_error(ctx, "fs_write_failed", "writeText", requested, "Unable to create parent directory: " + ec.message());
+    }
+    std::ofstream out(*resolved, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        JS_FreeCString(ctx, text);
+        return throw_fs_error(ctx, "fs_write_failed", "writeText", requested, "Unable to open file for writing");
+    }
+    out.write(text, static_cast<std::streamsize>(len));
+    JS_FreeCString(ctx, text);
+    if (!out) {
+        return throw_fs_error(ctx, "fs_write_failed", "writeText", requested, "Unable to write file");
+    }
+    JSValue obj = ok_path_object(ctx, *resolved);
+    JS_SetPropertyStr(ctx, obj, "bytesWritten", JS_NewInt64(ctx, static_cast<int64_t>(len)));
+    return obj;
+}
+
+JSValue fs_write_bytes(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    std::string requested;
+    if (!read_path_argument(ctx, "writeBytes", argc, argv, requested)) {
+        return JS_EXCEPTION;
+    }
+    if (argc < 2) {
+        return throw_fs_error(ctx, "fs_invalid_argument", "writeBytes", requested,
+            "writeBytes(path, data) requires string, ArrayBuffer, or TypedArray data");
+    }
+    auto resolved = authorize_write(ctx, "writeBytes", requested);
+    if (!resolved) return JS_EXCEPTION;
+    std::string bytes;
+    if (!extract_bytes(ctx, argv[1], bytes)) {
+        return throw_fs_error(ctx, "fs_invalid_argument", "writeBytes", requested,
+            "writeBytes(path, data) requires string, ArrayBuffer, or TypedArray data");
+    }
+    std::error_code ec;
+    fs::create_directories(resolved->parent_path(), ec);
+    if (ec) {
+        return throw_fs_error(ctx, "fs_write_failed", "writeBytes", requested, "Unable to create parent directory: " + ec.message());
+    }
+    std::ofstream out(*resolved, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        return throw_fs_error(ctx, "fs_write_failed", "writeBytes", requested, "Unable to open file for writing");
+    }
+    out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    if (!out) {
+        return throw_fs_error(ctx, "fs_write_failed", "writeBytes", requested, "Unable to write file");
+    }
+    JSValue obj = ok_path_object(ctx, *resolved);
+    JS_SetPropertyStr(ctx, obj, "bytesWritten", JS_NewInt64(ctx, static_cast<int64_t>(bytes.size())));
+    return obj;
+}
+
+JSValue fs_mkdir(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    std::string requested;
+    if (!read_path_argument(ctx, "mkdir", argc, argv, requested)) {
+        return JS_EXCEPTION;
+    }
+    auto resolved = authorize_write(ctx, "mkdir", requested);
+    if (!resolved) return JS_EXCEPTION;
+    bool recursive = argc >= 2 ? get_bool_option(ctx, argv[1], "recursive", false) : false;
+    std::error_code ec;
+    recursive ? fs::create_directories(*resolved, ec) : fs::create_directory(*resolved, ec);
+    if (ec && !fs::is_directory(*resolved)) {
+        return throw_fs_error(ctx, "fs_write_failed", "mkdir", requested, "Unable to create directory: " + ec.message());
+    }
+    return ok_path_object(ctx, *resolved);
+}
+
+JSValue fs_remove(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    std::string requested;
+    if (!read_path_argument(ctx, "remove", argc, argv, requested)) {
+        return JS_EXCEPTION;
+    }
+    auto resolved = authorize_write(ctx, "remove", requested);
+    if (!resolved) return JS_EXCEPTION;
+    bool recursive = argc >= 2 ? get_bool_option(ctx, argv[1], "recursive", false) : false;
+    std::error_code ec;
+    uintmax_t removed = recursive ? fs::remove_all(*resolved, ec) : (fs::remove(*resolved, ec) ? 1 : 0);
+    if (ec) {
+        return throw_fs_error(ctx, "fs_write_failed", "remove", requested, "Unable to remove path: " + ec.message());
+    }
+    JSValue obj = ok_path_object(ctx, *resolved);
+    JS_SetPropertyStr(ctx, obj, "removed", JS_NewInt64(ctx, static_cast<int64_t>(removed)));
+    return obj;
+}
+
+JSValue fs_mkdtemp(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    std::string requested;
+    if (!read_path_argument(ctx, "mkdtemp", argc, argv, requested)) {
+        return JS_EXCEPTION;
+    }
+    auto base = authorize_write(ctx, "mkdtemp", requested + "XXXXXX");
+    if (!base) return JS_EXCEPTION;
+    const auto ticks = std::chrono::steady_clock::now().time_since_epoch().count();
+    for (int i = 0; i < 100; ++i) {
+        fs::path candidate = requested + std::to_string(ticks) + "_" + std::to_string(i);
+        auto resolved = authorize_write(ctx, "mkdtemp", candidate.string());
+        if (!resolved) return JS_EXCEPTION;
+        std::error_code ec;
+        if (fs::create_directory(*resolved, ec)) {
+            return JS_NewString(ctx, resolved->string().c_str());
+        }
+        if (ec && !fs::exists(*resolved)) {
+            return throw_fs_error(ctx, "fs_write_failed", "mkdtemp", requested, "Unable to create temporary directory: " + ec.message());
+        }
+    }
+    return throw_fs_error(ctx, "fs_write_failed", "mkdtemp", requested, "Unable to create a unique temporary directory");
+}
+
 JSValue fs_exists(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
     std::string requested;
     if (!read_path_argument(ctx, "exists", argc, argv, requested)) {
@@ -336,6 +538,11 @@ JSValue fs_walk(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
 int init_fs_module(JSContext* ctx, JSModuleDef* module) {
     JS_SetModuleExport(ctx, module, "readText", JS_NewCFunction(ctx, fs_read_text, "readText", 1));
     JS_SetModuleExport(ctx, module, "readBytes", JS_NewCFunction(ctx, fs_read_bytes, "readBytes", 1));
+    JS_SetModuleExport(ctx, module, "writeText", JS_NewCFunction(ctx, fs_write_text, "writeText", 2));
+    JS_SetModuleExport(ctx, module, "writeBytes", JS_NewCFunction(ctx, fs_write_bytes, "writeBytes", 2));
+    JS_SetModuleExport(ctx, module, "mkdir", JS_NewCFunction(ctx, fs_mkdir, "mkdir", 2));
+    JS_SetModuleExport(ctx, module, "remove", JS_NewCFunction(ctx, fs_remove, "remove", 2));
+    JS_SetModuleExport(ctx, module, "mkdtemp", JS_NewCFunction(ctx, fs_mkdtemp, "mkdtemp", 1));
     JS_SetModuleExport(ctx, module, "exists", JS_NewCFunction(ctx, fs_exists, "exists", 1));
     JS_SetModuleExport(ctx, module, "stat", JS_NewCFunction(ctx, fs_stat, "stat", 1));
     JS_SetModuleExport(ctx, module, "list", JS_NewCFunction(ctx, fs_list, "list", 1));
@@ -373,6 +580,11 @@ extern "C" void* wl2_fs_quickjs_module_factory(void* context, const char* module
     }
     JS_AddModuleExport(ctx, module, "readText");
     JS_AddModuleExport(ctx, module, "readBytes");
+    JS_AddModuleExport(ctx, module, "writeText");
+    JS_AddModuleExport(ctx, module, "writeBytes");
+    JS_AddModuleExport(ctx, module, "mkdir");
+    JS_AddModuleExport(ctx, module, "remove");
+    JS_AddModuleExport(ctx, module, "mkdtemp");
     JS_AddModuleExport(ctx, module, "exists");
     JS_AddModuleExport(ctx, module, "stat");
     JS_AddModuleExport(ctx, module, "list");

@@ -32,6 +32,9 @@ import {
   streamVideoUdp,
   streamVideoTcp,
   rtspPlayback,
+  buildHlsOutput,
+  buildDashOutput,
+  buildSrtOutput,
   teeVideoBuffer,
   overlayVideoBuffer,
   DeviceMonitor,
@@ -45,6 +48,9 @@ import {
 | `capabilities()` | `{ gstreamer, features, bridges, launchTrusted, initialized }`. `features` reports compile-time `app`/`video`/`audio`/`deviceMonitor` support. |
 | `listPlugins(options?)` | `[ { name, version, description, license, source } ]`. `options.filter` is an optional substring match on the plugin name. |
 | `listElements(options?)` | `[ { name, longName, klass, description } ]`. `options.filter` matches the element name. |
+| `elementInfo(name)` | Element metadata plus `properties`, `padTemplates`, and optional `uriHandler`; returns `{ found:false, name }` for missing elements. |
+| `hasProperty(element, property)` | Boolean property existence check for installed elements. |
+| `uriHandlers(options?)` | Installed URI handler factories as `{ element, direction, protocols }`; `options.protocol` filters by protocol. |
 | `parseLaunch(description, options?)` | Build a `Pipeline` from GStreamer launch syntax. **Trusted input** — see `docs/security.md`. |
 | `testPattern(options)` | Create a `videotestsrc` pipeline attached to a `VideoBuffer`. |
 | `filePlayback(options)` | Decode a local file into a `VideoBuffer`, and optionally an `AudioBuffer`. |
@@ -61,6 +67,7 @@ import {
 | `streamVideoUdp(options)` | Encode/payloader frames from a `VideoBuffer` and send them over UDP. |
 | `streamVideoTcp(options)` | Encode/mux frames from a `VideoBuffer` and send them over TCP. |
 | `rtspPlayback(options)` | Decode an RTSP stream into a `VideoBuffer` after runtime connect authorization. |
+| `buildHlsOutput(options)` / `buildDashOutput(options)` / `buildSrtOutput(options)` | Return `{ launch, url, requiredElements, missingElements }` for helper-built streaming outputs. |
 | `teeVideoBuffer(options)` | Multi-sink helper: `tee` a source into a `VideoBuffer` and, with `outputPath`, an encoded file simultaneously. |
 | `overlayVideoBuffer(options)` | Capture a source through a named `textoverlay` into a `VideoBuffer`; update text live via `setOverlayText()`. |
 | `DeviceMonitor.create(options?)` | Enumerate GStreamer devices. `options.classes` filters device classes. |
@@ -81,6 +88,8 @@ const pipeline = parseLaunch("videotestsrc num-buffers=30 ! autovideoconvert ! f
 | `queryDuration()` | `{ ok, duration }` — duration in nanoseconds. |
 | `seek({ position, flush? })` | Seek to `position` nanoseconds; `flush` defaults to `true`. |
 | `busPoll({ timeoutMs?, max? })` | Drain bus messages. Waits up to `timeoutMs` (default 0) for the first message, then returns all currently queued up to `max` (default 64). |
+| `watchBus({ onMessage?, onError?, onWarning?, onEos? })` | Push-style bus callbacks (at least one required). Messages are forwarded from GStreamer's posting threads and the callbacks run on the JS thread with the same message shape `busPoll` returns. While a watch is active it consumes every bus message (`busPoll` returns nothing) and holds the event loop alive until `unwatchBus()` or `close()`. One watch per pipeline; throws `gstreamer_invalid_state` if one is already active. |
+| `unwatchBus()` | Stop the active watch and release its callbacks. Safe on a closed pipeline; `busPoll` works again afterwards and a new `watchBus()` may be installed. |
 | `attachVideoSink(options)` | Attach an `appsink` to a `VideoBuffer`. |
 | `attachAudioSink(options)` | Attach an `appsink` to an `AudioBuffer`. |
 | `attachPacketSink(options)` | Attach an `appsink` to a newly created `PacketBuffer`. |
@@ -167,6 +176,13 @@ packet records from a `PacketBuffer` to a file sink. `caps` defaults to
 uses `v4l2src device=...` when `device` is supplied. Without `device`, it uses a
 live `videotestsrc` so tests and headless environments can exercise the helper
 without hardware.
+
+`buildHlsOutput({ outDir, source, width?, height?, fps?, url?, segmentSeconds?, playlistLength?, maxFiles? })`
+and `buildDashOutput({ outDir, source, width?, height?, fps?, url?, segmentSeconds? })`
+return trusted launch strings for H.264 segment outputs. Larger HLS
+`playlistLength`/`maxFiles` values increase client slack for smoother playback
+at the cost of latency and temporary disk usage. `buildSrtOutput({ source, port,
+width?, height?, fps? })` returns an MPEG-TS-over-SRT listener launch.
 
 Network helpers authorize endpoints before constructing the pipeline, so denied
 network access fails before any GStreamer network element can open a socket.

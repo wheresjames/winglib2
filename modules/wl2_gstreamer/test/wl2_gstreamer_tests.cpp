@@ -125,6 +125,9 @@ import {
   capabilities,
   listElements,
   listPlugins,
+  elementInfo,
+  hasProperty,
+  uriHandlers,
   parseLaunch,
   testPattern,
   filePlayback,
@@ -142,6 +145,11 @@ import {
   streamVideoUdp,
   streamVideoTcp,
   rtspPlayback,
+  requiredElementsForUri,
+  canDecodeUri,
+  buildHlsOutput,
+  buildDashOutput,
+  buildSrtOutput,
   teeVideoBuffer,
   overlayVideoBuffer,
   Caps
@@ -178,6 +186,30 @@ const elements = listElements();
 assert(elements.some((e) => e.name === "appsink"), "appsink not listed");
 assert(listPlugins({ filter: "coreelements" }).length >= 1, "coreelements missing");
 const elementNames = new Set(elements.map((e) => e.name));
+const appsinkInfo = elementInfo("appsink");
+assert(appsinkInfo.found === true, "appsink elementInfo not found");
+assert(appsinkInfo.properties.some((p) => p.name === "max-buffers"), "appsink max-buffers property missing");
+assert(appsinkInfo.padTemplates.some((p) => p.direction === "sink"), "appsink sink pad template missing");
+assert(elementInfo("definitely-not-a-wl2-element").found === false, "missing elementInfo should be found:false");
+assert(hasProperty("appsink", "max-buffers") === true, "hasProperty false for appsink max-buffers");
+assert(hasProperty("appsink", "definitely-missing") === false, "hasProperty true for missing property");
+const fileHandlers = uriHandlers({ protocol: "file" });
+assert(fileHandlers.some((h) => h.direction === "src" && h.protocols.includes("file")), "file URI src handler missing");
+assert(requiredElementsForUri("rtsp://example.invalid/live").includes("rtspsrc"), "RTSP requirements missing rtspsrc");
+assert(requiredElementsForUri("https://example.invalid/live.m3u8").includes("hlsdemux"), "HLS requirements missing hlsdemux");
+const mjpegReq = requiredElementsForUri("http://example.invalid/mjpeg");
+assert(mjpegReq.includes("multipartdemux") && mjpegReq.includes("jpegparse") && mjpegReq.includes("jpegdec"), "MJPEG requirements missing multipartdemux/jpegparse/jpegdec");
+const decode = canDecodeUri("https://example.invalid/live.m3u8");
+assert(Array.isArray(decode.requiredElements) && Array.isArray(decode.missingElements), "canDecodeUri shape wrong");
+const hls = buildHlsOutput({ outDir: "/tmp/wl2-hls-test", source: "videotestsrc num-buffers=1" });
+assert(hls.launch.includes("hlssink") && hls.url.endsWith("/hls/stream.m3u8"), "buildHlsOutput wrong shape");
+const smoothHls = buildHlsOutput({ outDir: "/tmp/wl2-hls-test", source: "videotestsrc num-buffers=1", segmentSeconds: 2, playlistLength: 6, maxFiles: 12 });
+assert(smoothHls.launch.includes("target-duration=2 max-files=12 playlist-length=6"), "buildHlsOutput segment options missing: " + smoothHls.launch);
+const dash = buildDashOutput({ outDir: "/tmp/wl2-dash-test", source: "videotestsrc num-buffers=1", segmentSeconds: 4 });
+assert(dash.launch.includes("dashsink") && dash.url.endsWith("/dash/stream.mpd"), "buildDashOutput wrong shape");
+assert(dash.launch.includes("target-duration=4"), "buildDashOutput segmentSeconds missing: " + dash.launch);
+const srt = buildSrtOutput({ port: 7101, source: "videotestsrc num-buffers=1" });
+assert(srt.launch.includes("srtsink") && srt.url === "srt://127.0.0.1:7101", "buildSrtOutput wrong shape");
 
 // Bad launch string fails with a stable code.
 let parseCode = null;
@@ -414,6 +446,62 @@ overlay.play();
 assert(pollToEos(overlay), "overlay pipeline did not reach EOS");
 assert(overlay.stats().wl2_video_sink.frames >= 1, "overlay published no frames");
 overlay.close();
+
+// --- Push-style bus watch (watchBus / unwatchBus) ---
+
+// A finite pipeline delivers EOS through the watch without any polling.
+{
+  const wb = parseLaunch("videotestsrc num-buffers=5 ! fakesink");
+  let messages = 0;
+  let errors = 0;
+  const eos = new Promise((resolve, reject) => {
+    const installed = wb.watchBus({
+      onEos: () => resolve(true),
+      onError: (m) => { errors++; reject(new Error("watchBus error: " + (m.message || ""))); },
+      onMessage: () => { messages++; },
+    });
+    assert(installed.ok === true, "watchBus install failed");
+  });
+  // A second watch on the same pipeline is rejected while one is active.
+  let dupWatch = null;
+  try { wb.watchBus({ onEos: () => {} }); } catch (e) { dupWatch = e.code; }
+  assert(dupWatch === "gstreamer_invalid_state", "duplicate watchBus should fail, got " + dupWatch);
+  wb.play();
+  assert((await eos) === true, "watchBus did not deliver EOS");
+  assert(messages >= 1, "watchBus onMessage saw no messages");
+  assert(errors === 0, "watchBus saw unexpected errors");
+  // While the watch is active it consumes the bus, so busPoll stays empty.
+  assert(wb.busPoll({ timeoutMs: 0 }).length === 0, "busPoll should be empty while watch is active");
+  wb.unwatchBus();
+  wb.close();
+}
+
+// An erroring pipeline reports through onError, and re-watching after
+// unwatchBus() works on the same pipeline.
+{
+  const failing = parseLaunch("filesrc location=/nonexistent/wl2-gst-watch.bin ! fakesink");
+  failing.watchBus({ onMessage: () => {} });
+  failing.unwatchBus();
+  const failure = new Promise((resolve) => {
+    failing.watchBus({ onError: (m) => resolve(m) });
+  });
+  try { failing.play(); } catch (e) { /* state change may fail synchronously; the bus still errors */ }
+  const failMsg = await failure;
+  assert(failMsg && failMsg.type === "error" && typeof failMsg.message === "string",
+    "watchBus onError message shape wrong");
+  failing.close();
+  // unwatchBus after close is a harmless no-op.
+  failing.unwatchBus();
+}
+
+// watchBus argument validation.
+{
+  const wv = parseLaunch("videotestsrc num-buffers=1 ! fakesink");
+  let badArgs = null;
+  try { wv.watchBus({}); } catch (e) { badArgs = e.code; }
+  assert(badArgs === "gstreamer_invalid_argument", "watchBus without callbacks should fail, got " + badArgs);
+  wv.close();
+}
 
 // Dynamic pads: decodebin resolves its src pad at runtime. Only when a recorded
 // file exists to decode.

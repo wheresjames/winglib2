@@ -23,6 +23,8 @@ void register_pipeline_class(JSContext* ctx) {
     JS_SetPropertyStr(ctx, proto, "queryDuration", JS_NewCFunction(ctx, pipeline_query_duration, "queryDuration", 0));
     JS_SetPropertyStr(ctx, proto, "seek", JS_NewCFunction(ctx, pipeline_seek, "seek", 1));
     JS_SetPropertyStr(ctx, proto, "busPoll", JS_NewCFunction(ctx, pipeline_bus_poll, "busPoll", 1));
+    JS_SetPropertyStr(ctx, proto, "watchBus", JS_NewCFunction(ctx, pipeline_watch_bus, "watchBus", 1));
+    JS_SetPropertyStr(ctx, proto, "unwatchBus", JS_NewCFunction(ctx, pipeline_unwatch_bus, "unwatchBus", 0));
     JS_SetPropertyStr(ctx, proto, "attachVideoSink", JS_NewCFunction(ctx, pipeline_attach_video_sink, "attachVideoSink", 1));
     JS_SetPropertyStr(ctx, proto, "attachAudioSink", JS_NewCFunction(ctx, pipeline_attach_audio_sink, "attachAudioSink", 1));
     JS_SetPropertyStr(ctx, proto, "attachVideoSource", JS_NewCFunction(ctx, pipeline_attach_video_source, "attachVideoSource", 1));
@@ -48,6 +50,9 @@ int init_gstreamer_module(JSContext* ctx, JSModuleDef* module) {
     JS_SetModuleExport(ctx, module, "capabilities", JS_NewCFunction(ctx, gst_capabilities_fn, "capabilities", 0));
     JS_SetModuleExport(ctx, module, "listPlugins", JS_NewCFunction(ctx, gst_list_plugins_fn, "listPlugins", 1));
     JS_SetModuleExport(ctx, module, "listElements", JS_NewCFunction(ctx, gst_list_elements_fn, "listElements", 1));
+    JS_SetModuleExport(ctx, module, "elementInfo", JS_NewCFunction(ctx, gst_element_info_fn, "elementInfo", 1));
+    JS_SetModuleExport(ctx, module, "hasProperty", JS_NewCFunction(ctx, gst_has_property_fn, "hasProperty", 2));
+    JS_SetModuleExport(ctx, module, "uriHandlers", JS_NewCFunction(ctx, gst_uri_handlers_fn, "uriHandlers", 1));
     JS_SetModuleExport(ctx, module, "parseLaunch", JS_NewCFunction(ctx, gst_parse_launch_fn, "parseLaunch", 2));
     JS_SetModuleExport(ctx, module, "testPattern", JS_NewCFunction(ctx, gst_test_pattern_fn, "testPattern", 1));
     JS_SetModuleExport(ctx, module, "filePlayback", JS_NewCFunction(ctx, gst_file_playback_fn, "filePlayback", 1));
@@ -64,6 +69,11 @@ int init_gstreamer_module(JSContext* ctx, JSModuleDef* module) {
     JS_SetModuleExport(ctx, module, "streamVideoUdp", JS_NewCFunction(ctx, gst_stream_video_udp_fn, "streamVideoUdp", 1));
     JS_SetModuleExport(ctx, module, "streamVideoTcp", JS_NewCFunction(ctx, gst_stream_video_tcp_fn, "streamVideoTcp", 1));
     JS_SetModuleExport(ctx, module, "rtspPlayback", JS_NewCFunction(ctx, gst_rtsp_playback_fn, "rtspPlayback", 1));
+    JS_SetModuleExport(ctx, module, "requiredElementsForUri", JS_NewCFunction(ctx, gst_required_elements_for_uri_fn, "requiredElementsForUri", 1));
+    JS_SetModuleExport(ctx, module, "canDecodeUri", JS_NewCFunction(ctx, gst_can_decode_uri_fn, "canDecodeUri", 1));
+    JS_SetModuleExport(ctx, module, "buildHlsOutput", JS_NewCFunction(ctx, gst_build_hls_output_fn, "buildHlsOutput", 1));
+    JS_SetModuleExport(ctx, module, "buildDashOutput", JS_NewCFunction(ctx, gst_build_dash_output_fn, "buildDashOutput", 1));
+    JS_SetModuleExport(ctx, module, "buildSrtOutput", JS_NewCFunction(ctx, gst_build_srt_output_fn, "buildSrtOutput", 1));
     JS_SetModuleExport(ctx, module, "teeVideoBuffer", JS_NewCFunction(ctx, gst_tee_video_buffer_fn, "teeVideoBuffer", 1));
     JS_SetModuleExport(ctx, module, "overlayVideoBuffer", JS_NewCFunction(ctx, gst_overlay_video_buffer_fn, "overlayVideoBuffer", 1));
     JSValue deviceMonitor = JS_NewObject(ctx);
@@ -76,10 +86,11 @@ int init_gstreamer_module(JSContext* ctx, JSModuleDef* module) {
 }
 
 constexpr const char* kExportNames[] = {
-    "version", "capabilities", "listPlugins", "listElements", "parseLaunch", "testPattern",
+    "version", "capabilities", "listPlugins", "listElements", "elementInfo", "hasProperty", "uriHandlers", "parseLaunch", "testPattern",
     "filePlayback", "recordVideoBuffer", "recordPacketBuffer", "discoverMedia", "captureDevice", "DeviceMonitor",
     "sendUdpPackets", "receiveUdpPackets", "sendRtpPackets", "receiveRtpPackets",
     "sendTcpPackets", "receiveTcpPackets", "streamVideoUdp", "streamVideoTcp", "rtspPlayback",
+    "requiredElementsForUri", "canDecodeUri", "buildHlsOutput", "buildDashOutput", "buildSrtOutput",
     "teeVideoBuffer", "overlayVideoBuffer", "Caps",
 };
 

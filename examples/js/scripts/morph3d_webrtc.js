@@ -290,7 +290,7 @@ if (!clientLibSource) {
 }
 
 // --- Signaling authentication ----------------------------------------------
-// Short-lived bearer ticket (see http_webrtc_video_streamer.js for the same
+// Short-lived bearer ticket (see http_video_server.js for the same
 // pattern and the note that production should use signed HMAC tickets).
 const tickets = new Map();
 const TICKET_TTL_MS = 60000;

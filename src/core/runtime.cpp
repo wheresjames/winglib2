@@ -315,6 +315,69 @@ std::optional<std::filesystem::path> Runtime::resolveFilesystemReadPath(
     return std::nullopt;
 }
 
+std::optional<std::filesystem::path> Runtime::resolveFilesystemWritePath(
+    const std::filesystem::path& requested) const {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+
+    fs::path target = requested;
+    if (!target.is_absolute()) {
+        target = fs::current_path(ec) / target;
+        if (ec) {
+            return std::nullopt;
+        }
+    }
+    fs::path canonicalTarget = fs::weakly_canonical(target, ec);
+    if (ec) {
+        canonicalTarget = target.lexically_normal();
+    }
+
+    auto root_contains_target = [&](const fs::path& root) {
+        std::error_code rootEc;
+        fs::path canonicalRoot = fs::weakly_canonical(root, rootEc);
+        if (rootEc) {
+            canonicalRoot = root.lexically_normal();
+        }
+        return path_contained_by(canonicalTarget, canonicalRoot) || canonicalTarget == canonicalRoot;
+    };
+
+    if (options_.allowFilesystemWrites) {
+        for (const auto& root : options_.filesystemWriteRoots) {
+            if (root_contains_target(root)) {
+                return canonicalTarget;
+            }
+        }
+    }
+
+    for (const auto& root : interactiveFilesystemWriteRoots_) {
+        if (root_contains_target(root)) {
+            return canonicalTarget;
+        }
+    }
+
+    for (const auto& root : dynamicFilesystemWriteRoots_) {
+        if (root_contains_target(root)) {
+            return canonicalTarget;
+        }
+    }
+
+    if (options_.interactivePermissions) {
+        fs::path requestedRoot = canonicalTarget;
+        std::error_code statusEc;
+        if (!fs::is_directory(canonicalTarget, statusEc)) {
+            requestedRoot = canonicalTarget.parent_path();
+        }
+        if (!requestedRoot.empty()
+            && prompt_yes_no({"filesystem write " + canonicalTarget.string()
+                + " (grant write access under " + requestedRoot.string() + ")"})) {
+            interactiveFilesystemWriteRoots_.push_back(requestedRoot);
+            return canonicalTarget;
+        }
+    }
+
+    return std::nullopt;
+}
+
 bool Runtime::hasPermissions(const PermissionSet& requested) const {
     if (requested.ui && !options_.allowUi && !dynamicUiAllowed_) {
         return false;
@@ -374,6 +437,26 @@ bool Runtime::hasPermissions(const PermissionSet& requested) const {
             }
         }
         for (const auto& root : dynamicFilesystemReadRoots_) {
+            const auto canonicalRoot = canonical_permission_path(root);
+            if (path_contained_by(canonicalItem, canonicalRoot) || canonicalItem == canonicalRoot) {
+                ok = true;
+                break;
+            }
+        }
+        if (!ok) return false;
+    }
+    for (const auto& item : requested.filesystemWrite) {
+        bool ok = false;
+        const auto canonicalItem = canonical_permission_path(item);
+        for (const auto& root : options_.filesystemWriteRoots) {
+            const auto canonicalRoot = canonical_permission_path(root);
+            if (options_.allowFilesystemWrites &&
+                (path_contained_by(canonicalItem, canonicalRoot) || canonicalItem == canonicalRoot)) {
+                ok = true;
+                break;
+            }
+        }
+        for (const auto& root : dynamicFilesystemWriteRoots_) {
             const auto canonicalRoot = canonical_permission_path(root);
             if (path_contained_by(canonicalItem, canonicalRoot) || canonicalItem == canonicalRoot) {
                 ok = true;
@@ -480,6 +563,17 @@ Result<PermissionSet> Runtime::requestPermissions(const PermissionSet& requested
             granted.filesystemRead.push_back(canonicalItem);
         } else {
             return deny("filesystemRead " + item.string());
+        }
+    }
+    for (const auto& item : requested.filesystemWrite) {
+        if ((options_.allowFilesystemWrites && path_inside(options_.filesystemWriteRoots, item)) ||
+            path_inside(dynamicFilesystemWriteRoots_, item) ||
+            (options_.declaredPermissionsApproved && path_inside(options_.declaredPermissions.filesystemWrite, item))) {
+            const auto canonicalItem = canonical_permission_path(item);
+            dynamicFilesystemWriteRoots_.push_back(canonicalItem);
+            granted.filesystemWrite.push_back(canonicalItem);
+        } else {
+            return deny("filesystemWrite " + item.string());
         }
     }
 

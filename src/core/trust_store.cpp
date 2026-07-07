@@ -17,21 +17,46 @@ namespace {
 using json = nlohmann::json;
 
 json permission_set_json(const TrustPermissions& permissions) {
-    json fs = json::array();
-    for (const auto& entry : permissions.filesystemRead) {
-        fs.push_back({
-            {"raw", entry.raw.empty() ? entry.resolved.string() : entry.raw},
-            {"resolved", entry.resolved.string()},
-        });
-    }
+    auto filesystem_json = [](const std::vector<TrustFilesystemPath>& entries) {
+        json fs = json::array();
+        for (const auto& entry : entries) {
+            fs.push_back({
+                {"raw", entry.raw.empty() ? entry.resolved.string() : entry.raw},
+                {"resolved", entry.resolved.string()},
+            });
+        }
+        return fs;
+    };
+    json fsRead = filesystem_json(permissions.filesystemRead);
+    json fsWrite = filesystem_json(permissions.filesystemWrite);
     return {
         {"network", permissions.network},
         {"listen", permissions.listen},
         {"sharedMemory", permissions.sharedMemory},
-        {"filesystemRead", fs},
+        {"filesystemRead", fsRead},
+        {"filesystemWrite", fsWrite},
         {"ui", permissions.ui},
         {"graphics", permissions.graphics},
     };
+}
+
+void append_filesystem_permissions_from_json(const json& value, const char* key, std::vector<TrustFilesystemPath>& out) {
+    if (auto it = value.find(key); it != value.end() && it->is_array()) {
+        for (const auto& entry : *it) {
+            if (entry.is_string()) {
+                const auto text = entry.get<std::string>();
+                out.push_back({text, text});
+            } else if (entry.is_object()) {
+                const auto resolved = entry.value("resolved", std::string{});
+                if (!resolved.empty()) {
+                    out.push_back({
+                        entry.value("raw", resolved),
+                        std::filesystem::path(resolved),
+                    });
+                }
+            }
+        }
+    }
 }
 
 TrustPermissions trust_permissions_from_json(const json& value) {
@@ -44,22 +69,8 @@ TrustPermissions trust_permissions_from_json(const json& value) {
     out.sharedMemory = value.value("sharedMemory", std::vector<std::string>{});
     out.ui = value.value("ui", false);
     out.graphics = value.value("graphics", false);
-    if (auto it = value.find("filesystemRead"); it != value.end() && it->is_array()) {
-        for (const auto& entry : *it) {
-            if (entry.is_string()) {
-                const auto text = entry.get<std::string>();
-                out.filesystemRead.push_back({text, text});
-            } else if (entry.is_object()) {
-                const auto resolved = entry.value("resolved", std::string{});
-                if (!resolved.empty()) {
-                    out.filesystemRead.push_back({
-                        entry.value("raw", resolved),
-                        std::filesystem::path(resolved),
-                    });
-                }
-            }
-        }
-    }
+    append_filesystem_permissions_from_json(value, "filesystemRead", out.filesystemRead);
+    append_filesystem_permissions_from_json(value, "filesystemWrite", out.filesystemWrite);
     return out;
 }
 
@@ -133,12 +144,16 @@ PermissionSet permissionSetFromTrustPermissions(const TrustPermissions& permissi
     for (const auto& entry : permissions.filesystemRead) {
         out.filesystemRead.push_back(entry.resolved);
     }
+    for (const auto& entry : permissions.filesystemWrite) {
+        out.filesystemWrite.push_back(entry.resolved);
+    }
     return normalizePermissionSet(out);
 }
 
 TrustPermissions trustPermissionsFromPermissionSet(
     const PermissionSet& permissions,
-    const std::vector<std::string>& rawFilesystemRead) {
+    const std::vector<std::string>& rawFilesystemRead,
+    const std::vector<std::string>& rawFilesystemWrite) {
     const auto normalized = normalizePermissionSet(permissions);
     TrustPermissions out;
     out.network = normalized.network;
@@ -152,6 +167,13 @@ TrustPermissions trustPermissionsFromPermissionSet(
             ? rawFilesystemRead[i]
             : resolved.string();
         out.filesystemRead.push_back({raw, resolved});
+    }
+    for (size_t i = 0; i < normalized.filesystemWrite.size(); ++i) {
+        const auto resolved = normalized.filesystemWrite[i];
+        const std::string raw = i < rawFilesystemWrite.size() && !rawFilesystemWrite[i].empty()
+            ? rawFilesystemWrite[i]
+            : resolved.string();
+        out.filesystemWrite.push_back({raw, resolved});
     }
     return out;
 }
@@ -169,6 +191,9 @@ std::string trustPermissionSummary(const TrustPermissions& permissions) {
     }
     if (!permissions.filesystemRead.empty()) {
         categories.push_back("filesystemRead");
+    }
+    if (!permissions.filesystemWrite.empty()) {
+        categories.push_back("filesystemWrite");
     }
     if (permissions.ui) {
         categories.push_back("ui");

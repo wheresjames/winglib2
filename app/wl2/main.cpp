@@ -231,9 +231,12 @@ struct RunCommand {
     bool declaredPermissionsApproved = false;
     wl2::PermissionSet declaredPermissions;
     std::vector<std::string> declaredFilesystemReadRaw;
+    std::vector<std::string> declaredFilesystemWriteRaw;
     std::vector<std::string> sharedMemoryAllowList;
     bool allowFilesystemReads = false;
     std::vector<std::filesystem::path> filesystemReadRoots;
+    bool allowFilesystemWrites = false;
+    std::vector<std::filesystem::path> filesystemWriteRoots;
     wl2::crash::CrashReportConfig crashReport;
 };
 
@@ -283,7 +286,7 @@ struct TestCommand {
 void usage(std::ostream& out = std::cerr) {
     out
         << "usage:\n"
-        << "  wl2 run [--manifest wl2.yml] [--watch] [--stack-traces=auto|on|off] [--map-resource host:wl2:/prefix] [--trace-resources] [--load-module path] [--module-path dir] [--module-policy default|isolated|project-only|installed-only|system] [--allow-module-shadow] [--allow-builtin-module-fallback] [--no-builtin-module-fallback] [--allow ui,graphics,shared-memory[:prefix],filesystem-read[:root]] [--allow-network] [--network-allow host[:port]] [--allow-listen] [--listen-allow host[:port]] [--allow-ui] [--allow-graphics] [--allow-shared-memory] [--shared-memory-allow prefix] [--allow-filesystem-reads] [--filesystem-read-root root] [--allow-declared] [--trust-declared] [--no-permission-prompt] [--crash-report=off|auto|<path>] [--crash-report-dir dir] [script] [-- script-args...]\n"
+        << "  wl2 run [--manifest wl2.yml] [--watch] [--stack-traces=auto|on|off] [--map-resource host:wl2:/prefix] [--trace-resources] [--load-module path] [--module-path dir] [--module-policy default|isolated|project-only|installed-only|system] [--allow-module-shadow] [--allow-builtin-module-fallback] [--no-builtin-module-fallback] [--allow ui,graphics,shared-memory[:prefix],filesystem-read[:root],filesystem-write[:root]] [--allow-network] [--network-allow host[:port]] [--allow-listen] [--listen-allow host[:port]] [--allow-ui] [--allow-graphics] [--allow-shared-memory] [--shared-memory-allow prefix] [--allow-filesystem-reads] [--filesystem-read-root root] [--allow-filesystem-writes] [--filesystem-write-root root] [--allow-declared] [--trust-declared] [--no-permission-prompt] [--crash-report=off|auto|<path>] [--crash-report-dir dir] [script] [-- script-args...]\n"
         << "  wl2 config [--manifest wl2.yml] [--json] [--map-resource host:wl2:/prefix] [--load-module path] [--module-path dir] [--module-policy default|isolated|project-only|installed-only|system]\n"
         << "  wl2 resources <list|read|extract> [--manifest wl2.yml] [--map-resource host:wl2:/prefix] [executable] [path] [--out dir] [--raw]\n"
         << "  wl2 module validate <library-path>\n"
@@ -425,6 +428,13 @@ bool apply_allow_token(RunCommand& command, const std::string& token) {
         command.allowFilesystemReads = true;
         if (!value.empty()) {
             command.filesystemReadRoots.emplace_back(value);
+        }
+        return true;
+    }
+    if (name == "filesystem-write" || name == "filesystem_write" || name == "fs-write" || name == "fs_write") {
+        command.allowFilesystemWrites = true;
+        if (!value.empty()) {
+            command.filesystemWriteRoots.emplace_back(value);
         }
         return true;
     }
@@ -647,6 +657,7 @@ std::string normalize_permission_key(std::string key) {
     }
     if (key == "sharedmemory") return "shared_memory";
     if (key == "filesystemread" || key == "fs_read") return "filesystem_read";
+    if (key == "filesystemwrite" || key == "fs_write") return "filesystem_write";
     return key;
 }
 
@@ -683,6 +694,11 @@ bool append_declared_permission(RunCommand& command, const std::string& key, con
     if (normalized == "filesystem_read") {
         command.declaredPermissions.filesystemRead.emplace_back(expanded);
         command.declaredFilesystemReadRaw.push_back(value);
+        return true;
+    }
+    if (normalized == "filesystem_write") {
+        command.declaredPermissions.filesystemWrite.emplace_back(expanded);
+        command.declaredFilesystemWriteRaw.push_back(value);
         return true;
     }
     std::cerr << "unknown wl2 declared permission: " << key << '\n';
@@ -952,7 +968,8 @@ bool remember_declared_trust(
     record.sha256 = identity.checksum;
     record.permissions = wl2::trustPermissionsFromPermissionSet(
         command.declaredPermissions,
-        command.declaredFilesystemReadRaw);
+        command.declaredFilesystemReadRaw,
+        command.declaredFilesystemWriteRaw);
     record.grantedAt = now;
     record.lastUsedAt = now;
     record.source = command.trustDeclaredPermissions ? "cli" : "interactive";
@@ -979,6 +996,9 @@ std::vector<std::string> declared_permission_lines(const wl2::PermissionSet& per
     }
     for (const auto& item : permissions.filesystemRead) {
         lines.push_back("filesystem reads under " + item.string());
+    }
+    for (const auto& item : permissions.filesystemWrite) {
+        lines.push_back("filesystem writes under " + item.string());
     }
     return lines;
 }
@@ -1125,6 +1145,13 @@ std::vector<std::string> trust_record_permission_lines(const wl2::TrustRecord& r
     }
     for (const auto& item : permissions.filesystemRead) {
         std::string line = "filesystem reads under " + item.resolved.string();
+        if (!item.raw.empty() && item.raw != item.resolved.string()) {
+            line += " (" + item.raw + ")";
+        }
+        lines.push_back(line);
+    }
+    for (const auto& item : permissions.filesystemWrite) {
+        std::string line = "filesystem writes under " + item.resolved.string();
         if (!item.raw.empty() && item.raw != item.resolved.string()) {
             line += " (" + item.raw + ")";
         }
@@ -1685,6 +1712,10 @@ std::optional<RunCommand> parse_run_command(int argc, char** argv, int start, bo
             command.allowFilesystemReads = true;
             continue;
         }
+        if (arg == "--allow-filesystem-writes") {
+            command.allowFilesystemWrites = true;
+            continue;
+        }
         if (arg == "--filesystem-read-root") {
             if (++i >= argc) {
                 std::cerr << "--filesystem-read-root requires a directory\n";
@@ -1698,6 +1729,21 @@ std::optional<RunCommand> parse_run_command(int argc, char** argv, int start, bo
         if (arg.rfind(filesystemReadRootPrefix, 0) == 0) {
             command.allowFilesystemReads = true;
             command.filesystemReadRoots.emplace_back(arg.substr(filesystemReadRootPrefix.size()));
+            continue;
+        }
+        if (arg == "--filesystem-write-root") {
+            if (++i >= argc) {
+                std::cerr << "--filesystem-write-root requires a directory\n";
+                return std::nullopt;
+            }
+            command.allowFilesystemWrites = true;
+            command.filesystemWriteRoots.emplace_back(argv[i]);
+            continue;
+        }
+        constexpr std::string_view filesystemWriteRootPrefix = "--filesystem-write-root=";
+        if (arg.rfind(filesystemWriteRootPrefix, 0) == 0) {
+            command.allowFilesystemWrites = true;
+            command.filesystemWriteRoots.emplace_back(arg.substr(filesystemWriteRootPrefix.size()));
             continue;
         }
         constexpr std::string_view sharedMemoryAllowPrefix = "--shared-memory-allow=";
@@ -2144,6 +2190,8 @@ int run_script(wl2::RuntimeOptions options, const RunCommand& command) {
     options.sharedMemoryAllowList = command.sharedMemoryAllowList;
     options.allowFilesystemReads = command.allowFilesystemReads;
     options.filesystemReadRoots = command.filesystemReadRoots;
+    options.allowFilesystemWrites = command.allowFilesystemWrites;
+    options.filesystemWriteRoots = command.filesystemWriteRoots;
     options.declaredPermissions = command.declaredPermissions;
     options.declaredPermissionsApproved = command.declaredPermissionsApproved;
     options.interactivePermissions = command.interactivePermissions && stdin_is_terminal();

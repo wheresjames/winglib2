@@ -38,7 +38,10 @@ server.route("GET", "/users/:id", (req) => ({
 
 server.route("POST", "/upload", (req) => `${req.files.length} file(s)`);
 
-server.static("/assets", "/srv/www/assets");   // sandboxed to the root; filesystem-gated
+server.static("/assets", "/srv/www/assets", {
+  cacheControl: "no-store",
+  mimeTypes: { ".m3u8": "application/vnd.apple.mpegurl" },
+});   // sandboxed to the root; filesystem-gated
 
 server.ws("/socket", {
   onOpen: (conn) => conn.send("welcome"),
@@ -89,13 +92,65 @@ rejected Promise becomes a `500`.
   `content-type` header is added automatically when absent. Text-ish responses
   are gzip-compressed when the client sends `Accept-Encoding: gzip`.
 
-### `server.static(mount, root)`
+### `server.routeStream(method, path, handler)`
+
+Registers a streaming route; returns the server (chainable). Must be called
+before `listen()`. Instead of returning a body, `handler(req, stream)` drives a
+long-lived chunked response through the `stream` object — suitable for
+`multipart/x-mixed-replace` (MJPEG), server-sent events, and progress logs.
+
+- **`stream.respond({ status?, headers? })`** → `Promise<void>` — send the
+  response head once. The body uses `Transfer-Encoding: chunked`. A
+  `content-type` of `application/octet-stream` is added when absent (set it
+  explicitly for SSE/MJPEG). Rejects with `http_invalid_argument` when called
+  twice and `http_closed` when the client is already gone.
+- **`stream.write(data)`** → `Promise<boolean>` — append one chunk (string or
+  ArrayBuffer/TypedArray) and flush it. The promise resolves `true` once the
+  chunk was written to the socket — awaiting each write is the backpressure
+  mechanism — and `false` once the client has disconnected (the producer loop
+  should stop). Unawaited writes are bounded: exceeding the internal buffer
+  limit (4 MiB) closes the stream.
+- **`stream.close()`** → `Promise<void>` — finish the chunked body. Idempotent.
+  When the handler never called `respond()`, a bare `204` is sent instead.
+- **`stream.onClose(cb)`** — `cb` fires once, when the stream ends for any
+  reason (client disconnect, overflow, server close, or local close). Use it to
+  cancel producers that are not currently inside a `write()` await.
+- **`stream.closed`** — boolean.
+
+The stream is finished automatically when the handler's promise settles: a
+resolved handler completes the response (or sends `204` if it never responded);
+a rejected handler sends a `500` when nothing was sent yet, otherwise the
+chunked body is terminated. An open stream keeps the process alive until it
+finishes.
+
+```js
+server.routeStream("GET", "/mjpeg", async (req, stream) => {
+  await stream.respond({
+    status: 200,
+    headers: { "content-type": "multipart/x-mixed-replace; boundary=frame",
+               "cache-control": "no-store" },
+  });
+  while (!stream.closed) {
+    const jpeg = await nextJpegFrame();
+    await stream.write(`--frame\r\ncontent-type: image/jpeg\r\ncontent-length: ${jpeg.byteLength}\r\n\r\n`);
+    if (!(await stream.write(jpeg))) break;
+    await stream.write("\r\n");
+  }
+});
+```
+
+### `server.static(mount, root, options?)`
 
 Serves files under the URL prefix `mount` from the filesystem directory `root`
 (before `listen()`; chainable). Path traversal is rejected, and each file access
 is checked against the runtime's filesystem-read policy (`allowFilesystemReads` +
 `filesystemReadRoots`). MIME type is inferred from the extension; a directory
 request serves `index.html`.
+
+`root` is validated when the mount is registered, so missing directories fail
+with `http_not_found` before the server starts. `options.mimeTypes` (alias
+`options.mime`) overrides extension MIME types using keys with or without a
+leading dot, and `options.cacheControl` adds a `Cache-Control` response header.
 
 ### `server.ws(path, handlers)`
 

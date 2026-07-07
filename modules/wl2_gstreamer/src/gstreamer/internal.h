@@ -72,6 +72,9 @@ JSValue gst_version_fn(JSContext* ctx, JSValueConst thisVal, int argc, JSValueCo
 JSValue gst_capabilities_fn(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv);
 JSValue gst_list_plugins_fn(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv);
 JSValue gst_list_elements_fn(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv);
+JSValue gst_element_info_fn(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv);
+JSValue gst_has_property_fn(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv);
+JSValue gst_uri_handlers_fn(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv);
 JSValue gst_parse_launch_fn(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv);
 JSValue gst_test_pattern_fn(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv);
 JSValue gst_file_playback_fn(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv);
@@ -89,6 +92,11 @@ JSValue gst_receive_tcp_packets_fn(JSContext* ctx, JSValueConst thisVal, int arg
 JSValue gst_stream_video_udp_fn(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv);
 JSValue gst_stream_video_tcp_fn(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv);
 JSValue gst_rtsp_playback_fn(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv);
+JSValue gst_required_elements_for_uri_fn(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv);
+JSValue gst_can_decode_uri_fn(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv);
+JSValue gst_build_hls_output_fn(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv);
+JSValue gst_build_dash_output_fn(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv);
+JSValue gst_build_srt_output_fn(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv);
 
 std::optional<wl2::VideoPixelFormat> gst_format_to_pixel(const std::string& format);
 const char* pixel_to_gst_format(wl2::VideoPixelFormat format);
@@ -109,10 +117,31 @@ struct Bridge {
     virtual GstSample* acquireLastSample() { return nullptr; }
 };
 
+// Shared state behind Pipeline.watchBus(). The GstBus sync handler runs on
+// whatever thread posts a bus message, so it may only read the atomics and
+// forward ref'd messages to the JS thread; the JSValue callback slots are
+// touched exclusively on the JS thread. The slot survives watch/unwatch cycles
+// because a GstBus sync handler cannot be replaced while installed — it is
+// installed once and only removed in close_pipeline() after the pipeline has
+// fully reached NULL (no streaming thread can still be inside gst_bus_post).
+struct BusWatchSlot {
+    wl2::Runtime* runtime = nullptr;
+    JSContext* ctx = nullptr;
+    JSValue onMessage = JS_UNDEFINED;
+    JSValue onError = JS_UNDEFINED;
+    JSValue onWarning = JS_UNDEFINED;
+    JSValue onEos = JS_UNDEFINED;
+    std::atomic<bool> active{false};
+    // Bumped on every watch/unwatch so completions posted for an older watch
+    // are dropped instead of invoking the new watch's callbacks.
+    std::atomic<uint64_t> generation{0};
+};
+
 struct PipelineBox {
     GstElement* pipeline = nullptr;
     GstBus* bus = nullptr;
     std::vector<std::unique_ptr<Bridge>> bridges;
+    std::shared_ptr<BusWatchSlot> busWatch;
     bool closed = false;
 };
 
@@ -130,7 +159,12 @@ JSValue pipeline_query_position(JSContext* ctx, JSValueConst thisVal, int argc, 
 JSValue pipeline_query_duration(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv);
 JSValue pipeline_seek(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv);
 JSValue pipeline_bus_poll(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv);
+JSValue pipeline_watch_bus(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv);
+JSValue pipeline_unwatch_bus(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv);
 JSValue pipeline_close(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv);
+
+// Serialize one bus message into a JS object (does not unref the message).
+JSValue message_to_js(JSContext* ctx, GstMessage* message);
 
 JSValue pipeline_attach_video_sink(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv);
 JSValue pipeline_attach_audio_sink(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv);

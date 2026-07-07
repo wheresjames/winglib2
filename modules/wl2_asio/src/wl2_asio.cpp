@@ -41,6 +41,8 @@ constexpr const char* AsioApi = R"(Exports JavaScript module wl2:asio.
 Functions:
   connect({ host, port, timeoutMs }) -> Promise<TcpSocket>
   listen({ host, port }) -> Promise<TcpServer>
+  setTimeout(callback, delayMs) -> Timer
+  setInterval(callback, intervalMs) -> Timer
 
 TcpSocket:
   read({ maxBytes, timeoutMs }) -> Promise<wl2.Buffer>   (0 bytes signals EOF)
@@ -53,6 +55,9 @@ TcpServer:
   accept({ timeoutMs }) -> Promise<TcpSocket>
   address() -> { host, port }
   close()                                                  (idempotent)
+
+Timer:
+  cancel() / close()                                       (idempotent)
 
 Security defaults:
   Network access is denied by default. The host runtime must grant it
@@ -170,6 +175,7 @@ JSValue new_socket_object(JSContext* ctx, std::shared_ptr<TcpSocketHandle> handl
 }
 
 JSClassID tcp_server_class_id = 0;
+JSClassID timer_class_id = 0;
 
 struct ServerBox {
     std::shared_ptr<TcpServerHandle> handle;
@@ -191,6 +197,71 @@ JSValue new_server_object(JSContext* ctx, std::shared_ptr<TcpServerHandle> handl
         return obj;
     }
     JS_SetOpaque(obj, new ServerBox{std::move(handle)});
+    return obj;
+}
+
+struct TimerHandle {
+    asio::steady_timer timer;
+    wl2::Runtime* runtime = nullptr;
+    JSContext* ctx = nullptr;
+    JSValue callback = JS_UNDEFINED;
+    // closed: the timer no longer holds its keep-alive operation (finished or
+    // cancelled). cancelled: the user asked for cancellation — this is what
+    // suppresses a queued-but-not-yet-run callback. A one-shot timer is closed
+    // as soon as its final completion is posted, but not cancelled, so the
+    // posted callback still runs exactly once.
+    std::atomic<bool> closed{false};
+    std::atomic<bool> cancelled{false};
+    int64_t intervalMs = 0;
+    bool repeating = false;
+
+    explicit TimerHandle(asio::io_context& io) : timer(io) {}
+};
+
+struct TimerBox {
+    std::shared_ptr<TimerHandle> handle;
+};
+
+void cancel_timer_handle(const std::shared_ptr<TimerHandle>& handle) {
+    if (!handle) {
+        return;
+    }
+    handle->cancelled = true;
+    if (handle->closed.exchange(true)) {
+        return;
+    }
+    if (handle->runtime) {
+        handle->runtime->async().endOperation();
+    }
+    asio::post(handle->timer.get_executor(), [handle] {
+        try {
+            handle->timer.cancel();
+        } catch (...) {
+        }
+    });
+}
+
+void timer_finalizer(JSRuntime* rt, JSValue val) {
+    (void)rt;
+    // Dropping the Timer object does NOT cancel the timer (standard JS timer
+    // semantics: an armed timer fires whether or not the handle is kept). The
+    // native TimerHandle stays alive through the asio wait chain until it
+    // fires or is cancelled explicitly.
+    auto* box = static_cast<TimerBox*>(JS_GetOpaque(val, timer_class_id));
+    delete box;
+}
+
+std::shared_ptr<TimerHandle> get_timer(JSContext* ctx, JSValueConst value) {
+    auto* box = static_cast<TimerBox*>(JS_GetOpaque2(ctx, value, timer_class_id));
+    return box ? box->handle : nullptr;
+}
+
+JSValue new_timer_object(JSContext* ctx, std::shared_ptr<TimerHandle> handle) {
+    JSValue obj = JS_NewObjectClass(ctx, timer_class_id);
+    if (JS_IsException(obj)) {
+        return obj;
+    }
+    JS_SetOpaque(obj, new TimerBox{std::move(handle)});
     return obj;
 }
 
@@ -1037,6 +1108,83 @@ JSValue tcp_server_close(JSContext* ctx, JSValueConst thisVal, int argc, JSValue
     return JS_UNDEFINED;
 }
 
+void arm_timer(const std::shared_ptr<TimerHandle>& handle) {
+    handle->timer.expires_after(std::chrono::milliseconds(handle->intervalMs));
+    handle->timer.async_wait([handle](const asio::error_code& ec) {
+        if (ec || handle->cancelled) {
+            return;
+        }
+        const bool lastShot = !handle->repeating;
+        handle->runtime->async().post([handle, lastShot] {
+            // Runs on the JS thread. A one-shot timer is already closed by the
+            // time this drains — only user cancellation suppresses the call.
+            if (handle->cancelled) {
+                return;
+            }
+            JSValue result = JS_Call(handle->ctx, handle->callback, JS_UNDEFINED, 0, nullptr);
+            JS_FreeValue(handle->ctx, result);
+            if (lastShot) {
+                JS_FreeValue(handle->ctx, handle->callback);
+                handle->callback = JS_UNDEFINED;
+            }
+        });
+        if (handle->repeating) {
+            arm_timer(handle);
+        } else {
+            bool wasClosed = handle->closed.exchange(true);
+            if (!wasClosed) {
+                handle->runtime->async().endOperation();
+            }
+        }
+    });
+}
+
+JSValue create_timer(JSContext* ctx, int argc, JSValueConst* argv, bool repeating, const char* operation) {
+    wl2::Runtime* runtime = static_cast<wl2::Runtime*>(JS_GetContextOpaque(ctx));
+    if (!runtime) {
+        return JS_ThrowInternalError(ctx, "Runtime is unavailable");
+    }
+    if (argc < 2 || !JS_IsFunction(ctx, argv[0])) {
+        return JS_Throw(ctx, make_error(ctx, AsioErr::InvalidArgument, operation, "", 0,
+            std::string(operation) + "(callback, delayMs) requires a function callback"));
+    }
+    int64_t delay = 0;
+    if (JS_ToInt64(ctx, &delay, argv[1]) < 0 || delay < 0) {
+        return JS_Throw(ctx, make_error(ctx, AsioErr::InvalidArgument, operation, "", 0,
+            "delayMs must be a non-negative integer"));
+    }
+    auto handle = std::make_shared<TimerHandle>(ensure_io());
+    handle->runtime = runtime;
+    handle->ctx = ctx;
+    handle->callback = JS_DupValue(ctx, argv[0]);
+    handle->intervalMs = delay;
+    handle->repeating = repeating;
+    runtime->async().beginOperation();
+    asio::post(handle->timer.get_executor(), [handle] {
+        arm_timer(handle);
+    });
+    return new_timer_object(ctx, handle);
+}
+
+JSValue asio_set_timeout(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    return create_timer(ctx, argc, argv, false, "setTimeout");
+}
+
+JSValue asio_set_interval(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv) {
+    return create_timer(ctx, argc, argv, true, "setInterval");
+}
+
+JSValue timer_cancel(JSContext* ctx, JSValueConst thisVal, int argc, JSValueConst* argv) {
+    (void)argc;
+    (void)argv;
+    auto handle = get_timer(ctx, thisVal);
+    if (!handle) {
+        return JS_ThrowTypeError(ctx, "cancel() called on a non-timer");
+    }
+    cancel_timer_handle(handle);
+    return JS_UNDEFINED;
+}
+
 // --- Module wiring -------------------------------------------------------------
 
 void register_socket_class(JSContext* ctx) {
@@ -1073,11 +1221,29 @@ void register_server_class(JSContext* ctx) {
     JS_SetClassProto(ctx, tcp_server_class_id, proto);
 }
 
+void register_timer_class(JSContext* ctx) {
+    JSRuntime* rt = JS_GetRuntime(ctx);
+    if (timer_class_id == 0) {
+        JS_NewClassID(&timer_class_id);
+    }
+    JSClassDef def{};
+    def.class_name = "Timer";
+    def.finalizer = timer_finalizer;
+    JS_NewClass(rt, timer_class_id, &def);
+    JSValue proto = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, proto, "cancel", JS_NewCFunction(ctx, timer_cancel, "cancel", 0));
+    JS_SetPropertyStr(ctx, proto, "close", JS_NewCFunction(ctx, timer_cancel, "close", 0));
+    JS_SetClassProto(ctx, timer_class_id, proto);
+}
+
 int init_asio_module(JSContext* ctx, JSModuleDef* module) {
     register_socket_class(ctx);
     register_server_class(ctx);
+    register_timer_class(ctx);
     JS_SetModuleExport(ctx, module, "connect", JS_NewCFunction(ctx, asio_connect, "connect", 1));
     JS_SetModuleExport(ctx, module, "listen", JS_NewCFunction(ctx, asio_listen, "listen", 1));
+    JS_SetModuleExport(ctx, module, "setTimeout", JS_NewCFunction(ctx, asio_set_timeout, "setTimeout", 2));
+    JS_SetModuleExport(ctx, module, "setInterval", JS_NewCFunction(ctx, asio_set_interval, "setInterval", 2));
     return 0;
 }
 
@@ -1115,6 +1281,8 @@ extern "C" void* wl2_asio_quickjs_module_factory(void* context, const char* modu
     }
     JS_AddModuleExport(ctx, module, "connect");
     JS_AddModuleExport(ctx, module, "listen");
+    JS_AddModuleExport(ctx, module, "setTimeout");
+    JS_AddModuleExport(ctx, module, "setInterval");
     return module;
 #else
     (void)context;

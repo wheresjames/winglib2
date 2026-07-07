@@ -273,7 +273,7 @@ Methods: `onMessage(conn, text)`, `onClose(conn)`, `close()`. `conn` must expose
 
 The browser counterpart is the reusable `wl2-webrtc-client.js` library shipped
 with `examples/js/scripts/lib/` and demonstrated by
-`examples/js/scripts/http_webrtc_video_streamer.js`.
+`examples/js/scripts/http_video_server.js`.
 
 ## Errors
 

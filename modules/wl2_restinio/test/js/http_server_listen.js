@@ -4,6 +4,9 @@
 // terminates this process. An in-process client cannot be used because the
 // wl2:curl client blocks the JS thread the server also needs.
 import { HttpServer } from "wl2:http";
+import { setTimeout as delayTimeout } from "wl2:asio";
+
+const sleep = (ms) => new Promise((resolve) => delayTimeout(resolve, ms));
 
 // The fixture passes the chosen port (numeric) and the static root (a path) as
 // script arguments.
@@ -57,9 +60,48 @@ server.ws("/socket", {
   onClose: () => {},
 });
 
+// Streaming route: several chunks over one long-lived chunked response. The
+// handler returns without calling close() to prove auto-finish on settlement.
+server.routeStream("GET", "/events", async (req, stream) => {
+  await stream.respond({ status: 200, headers: { "content-type": "text/event-stream" } });
+  for (const word of ["one", "two", "three"]) {
+    const ok = await stream.write(`data: ${word}\n\n`);
+    if (!ok) return;
+  }
+});
+
+// Endless drip stream: proves a client disconnect surfaces as write() -> false
+// (and onClose), so the producer loop can stop. /drip-status reports what the
+// producer observed.
+let dripState = "idle";
+server.routeStream("GET", "/drip", async (req, stream) => {
+  dripState = "streaming";
+  stream.onClose(() => { dripState = "closed"; });
+  await stream.respond({ status: 200, headers: { "content-type": "application/octet-stream" } });
+  for (let i = 0; i < 10000 && !stream.closed; ++i) {
+    const ok = await stream.write(`tick ${i}\n`);
+    if (!ok) break;
+    await sleep(10);
+  }
+});
+server.route("GET", "/drip-status", () => dripState);
+
+// respond() twice is rejected with a stable code.
+server.routeStream("GET", "/respond-twice", async (req, stream) => {
+  await stream.respond({ status: 200 });
+  let code = "";
+  try { await stream.respond({ status: 200 }); } catch (e) { code = e.code; }
+  await stream.write(`code=${code}`);
+});
+
 // Static file serving under /assets, sandboxed to the provided root.
 if (staticRoot) {
-  server.static("/assets", staticRoot);
+  server.static("/assets", staticRoot, {
+    cacheControl: "no-store",
+    mimeTypes: {
+      ".m3u8": "application/vnd.apple.mpegurl",
+    },
+  });
 }
 
 await server.listen();

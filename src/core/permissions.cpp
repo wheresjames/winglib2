@@ -86,7 +86,11 @@ PermissionSet normalizePermissionSet(const PermissionSet& permissions) {
     for (auto& path : out.filesystemRead) {
         path = path.lexically_normal();
     }
+    for (auto& path : out.filesystemWrite) {
+        path = path.lexically_normal();
+    }
     sort_unique(out.filesystemRead);
+    sort_unique(out.filesystemWrite);
     return out;
 }
 
@@ -117,6 +121,11 @@ bool permissionSetContains(const PermissionSet& approved, const PermissionSet& r
     }
     for (const auto& item : normalizedRequested.filesystemRead) {
         if (!path_inside(normalizedApproved.filesystemRead, item)) {
+            return false;
+        }
+    }
+    for (const auto& item : normalizedRequested.filesystemWrite) {
+        if (!path_inside(normalizedApproved.filesystemWrite, item)) {
             return false;
         }
     }
@@ -152,6 +161,11 @@ PermissionSet permissionSetDelta(const PermissionSet& approved, const Permission
     for (const auto& item : normalizedRequested.filesystemRead) {
         if (!path_inside(normalizedApproved.filesystemRead, item)) {
             delta.filesystemRead.push_back(item);
+        }
+    }
+    for (const auto& item : normalizedRequested.filesystemWrite) {
+        if (!path_inside(normalizedApproved.filesystemWrite, item)) {
+            delta.filesystemWrite.push_back(item);
         }
     }
     return normalizePermissionSet(delta);

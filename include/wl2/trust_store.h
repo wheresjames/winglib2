@@ -15,7 +15,7 @@
 
 namespace wl2 {
 
-struct TrustFilesystemRead {
+struct TrustFilesystemPath {
     std::string raw;
     std::filesystem::path resolved;
 };
@@ -24,7 +24,8 @@ struct TrustPermissions {
     std::vector<std::string> network;
     std::vector<std::string> listen;
     std::vector<std::string> sharedMemory;
-    std::vector<TrustFilesystemRead> filesystemRead;
+    std::vector<TrustFilesystemPath> filesystemRead;
+    std::vector<TrustFilesystemPath> filesystemWrite;
     bool ui = false;
     bool graphics = false;
 };
@@ -58,7 +59,8 @@ struct TrustMatch {
 PermissionSet permissionSetFromTrustPermissions(const TrustPermissions& permissions);
 TrustPermissions trustPermissionsFromPermissionSet(
     const PermissionSet& permissions,
-    const std::vector<std::string>& rawFilesystemRead = {});
+    const std::vector<std::string>& rawFilesystemRead = {},
+    const std::vector<std::string>& rawFilesystemWrite = {});
 
 /// Comma-separated list of the permission categories present in a record, for `trust list`.
 std::string trustPermissionSummary(const TrustPermissions& permissions);

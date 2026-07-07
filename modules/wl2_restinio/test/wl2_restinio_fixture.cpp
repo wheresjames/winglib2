@@ -402,6 +402,18 @@ int main(int argc, char** argv) {
             rc = fail("static body: [" + body_of(response) + "]");
         } else if (header_of(response, "content-type").find("text/plain") == std::string::npos) {
             rc = fail("static content-type: [" + header_of(response, "content-type") + "]");
+        } else if (header_of(response, "cache-control") != "no-store") {
+            rc = fail("static cache-control: [" + header_of(response, "cache-control") + "]");
+        }
+    }
+    // Static MIME overrides support media playlist mounts used by the streamer examples.
+    if (rc == 0 && !staticRoot.empty()) {
+        if (!http_request(port, "GET", "/assets/playlist.m3u8", "", response)) {
+            rc = fail("static playlist request failed");
+        } else if (status_of(response) != 200) {
+            rc = fail("static playlist status: " + std::to_string(status_of(response)));
+        } else if (header_of(response, "content-type").find("application/vnd.apple.mpegurl") == std::string::npos) {
+            rc = fail("static playlist content-type: [" + header_of(response, "content-type") + "]");
         }
     }
     // Static traversal must be rejected.
@@ -445,6 +457,68 @@ int main(int argc, char** argv) {
                     + " code=" + std::to_string(websocket_close_code(payload)));
             }
             ::close(ws);
+        }
+    }
+
+    // Streaming route: one long-lived chunked response carrying several writes,
+    // finished automatically when the JS handler returns.
+    if (rc == 0) {
+        if (!http_request(port, "GET", "/events", "", response)) {
+            rc = fail("stream request failed");
+        } else if (status_of(response) != 200) {
+            rc = fail("stream status: " + std::to_string(status_of(response)));
+        } else if (header_of(response, "transfer-encoding").find("chunked") == std::string::npos) {
+            rc = fail("stream transfer-encoding: [" + header_of(response, "transfer-encoding") + "]");
+        } else if (header_of(response, "content-type").find("text/event-stream") == std::string::npos) {
+            rc = fail("stream content-type: [" + header_of(response, "content-type") + "]");
+        } else {
+            const std::string body = body_of(response); // raw chunked framing
+            if (body.find("data: one") == std::string::npos || body.find("data: two") == std::string::npos
+                || body.find("data: three") == std::string::npos) {
+                rc = fail("stream body missing chunks: [" + body + "]");
+            }
+        }
+    }
+    // respond() twice rejects with a stable code (reported through the stream).
+    if (rc == 0) {
+        if (!http_request(port, "GET", "/respond-twice", "", response)
+            || body_of(response).find("code=http_invalid_argument") == std::string::npos) {
+            rc = fail("respond-twice body: [" + body_of(response) + "]");
+        }
+    }
+    // Client disconnect mid-stream is observed by the producer: open the endless
+    // /drip stream, read a little, hang up, then poll /drip-status until the
+    // server reports the stream closed.
+    if (rc == 0) {
+        int fd = connect_with_retry(port, 1);
+        if (fd < 0) {
+            rc = fail("drip connect failed");
+        } else {
+            std::string req = "GET /drip HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+            if (!send_all(fd, req)) {
+                rc = fail("drip send failed");
+            } else {
+                char buf[512];
+                ssize_t n = ::recv(fd, buf, sizeof(buf), 0); // headers + first ticks
+                if (n <= 0) {
+                    rc = fail("drip read failed");
+                }
+            }
+            ::close(fd);
+        }
+        if (rc == 0) {
+            bool closedSeen = false;
+            for (int i = 0; i < 50 && !closedSeen; ++i) {
+                if (http_request(port, "GET", "/drip-status", "", response)
+                    && body_of(response) == "closed") {
+                    closedSeen = true;
+                } else {
+                    usleep(100 * 1000);
+                }
+            }
+            if (!closedSeen) {
+                rc = fail("drip stream did not observe the client disconnect");
+            }
         }
     }
 

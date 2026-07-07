@@ -43,6 +43,15 @@ set_tests_properties(scripts.wl2_asio_tcp_server PROPERTIES
     LABELS "js;asio;integration"
     TIMEOUT 30)
 
+add_test(NAME scripts.wl2_asio_timers
+    COMMAND
+        $<TARGET_FILE:wl2>
+        run
+        ${CMAKE_CURRENT_SOURCE_DIR}/js/timers.test.js)
+set_tests_properties(scripts.wl2_asio_timers PROPERTIES
+    LABELS "js;asio;integration;timers"
+    TIMEOUT 15)
+
 # Single-file permission declaration: the leading `/* wl2 ... */` block defines
 # a loopback envelope that runtime requestPermissions() can turn into grants.
 add_test(NAME scripts.wl2_asio_declared_permissions

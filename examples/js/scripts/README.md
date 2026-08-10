@@ -1,5 +1,28 @@
 # JavaScript Script Examples
 
+## onvif_camera_console.js
+
+A loopback browser console for bounded ONVIF camera discovery, authenticated
+camera inspection, WebRTC video, and hold-to-move PTZ controls. Discovery
+requires explicit IPv4 CIDRs; it never silently enumerates interfaces. Camera
+credentials remain in the server-side script and are used for ONVIF and RTSP,
+while the browser receives only a VP8 WebRTC track.
+
+Run from the repository root:
+
+```sh
+./build/bin/wl2 run --allow-declared \
+  examples/js/scripts/onvif_camera_console.js -- --port=8080
+```
+
+Open the printed loopback URL, enter a CIDR such as `192.168.1.0/24`, and scan.
+The default expansion limit is 256 hosts; change it with
+`--maximum-hosts=<count>`. Playback requires GStreamer `uridecodebin`, `vp8enc`,
+and `rtpvp8pay` support. This is a local administrative example, not a remotely
+deployable camera management service: non-loopback deployment needs HTTP user
+authentication, CSRF protection, signed WebRTC tickets, TLS, and narrower
+network policy.
+
 ## morph3d.js
 
 `morph3d.js` is a single-file 3D + Slint demo. The JavaScript builds a dynamic

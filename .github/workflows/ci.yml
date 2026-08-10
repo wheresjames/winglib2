@@ -1,0 +1,201 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CMAKE_BUILD_PARALLEL_LEVEL: "2"
+  CTEST_PARALLEL_LEVEL: "2"
+  WL2_CMAKE_VERSION: "4.1.3"
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  CCACHE_BASEDIR: ${{ github.workspace }}
+  CCACHE_NOHASHDIR: "true"
+
+jobs:
+  core:
+    name: Core (${{ matrix.toolchain }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - toolchain: gcc
+            cc: gcc
+            cxx: g++
+            out_of_tree_tests: ON
+          - toolchain: clang
+            cc: clang
+            cxx: clang++
+            out_of_tree_tests: OFF
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            ccache \
+            libboost-date-time-dev \
+            libboost-stacktrace-dev \
+            libboost-thread-dev \
+            libgl1-mesa-dev \
+            ninja-build \
+            python3-venv
+
+      - name: Install compatible CMake
+        run: |
+          python3 -m venv "$RUNNER_TEMP/cmake"
+          "$RUNNER_TEMP/cmake/bin/pip" install \
+            --disable-pip-version-check \
+            "cmake==$WL2_CMAKE_VERSION"
+          echo "$RUNNER_TEMP/cmake/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/cmake/bin/cmake" --version
+
+      - name: Restore dependency and compiler caches
+        uses: actions/cache@v5
+        with:
+          path: |
+            .ccache
+            .deps
+          key: >-
+            ${{ runner.os }}-cmake-${{ env.WL2_CMAKE_VERSION }}-${{ matrix.toolchain }}-core-
+            ${{ hashFiles('CMakeLists.txt', 'cmake/**/*.cmake', 'modules/**/CMakeLists.txt', 'modules/**/cmake/*.cmake') }}
+          restore-keys: |
+            ${{ runner.os }}-cmake-${{ env.WL2_CMAKE_VERSION }}-${{ matrix.toolchain }}-core-
+
+      - name: Configure
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: |
+          cmake -S . -B build/ci-core -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DWL2_DEPS=download \
+            -DWL2_ENABLE_EXTENDED_MODULES=OFF \
+            -DWL2_ENABLE_3D=OFF \
+            -DWL2_ENABLE_HTTP=OFF \
+            -DWL2_BUILD_DOCS=OFF \
+            -DWL2_BUILD_OUTOFTREE_TESTS=${{ matrix.out_of_tree_tests }}
+
+      - name: Build
+        run: cmake --build build/ci-core
+
+      - name: Test
+        run: ctest --test-dir build/ci-core --output-on-failure
+
+      - name: Show compiler cache statistics
+        if: always()
+        run: ccache --show-stats
+
+      - name: Upload test log
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: core-${{ matrix.toolchain }}-test-log
+          path: build/ci-core/Testing/Temporary/LastTest.log
+          if-no-files-found: ignore
+
+  network-modules:
+    name: Extended network modules (GCC)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Install build tools and TLS headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            ccache \
+            libboost-date-time-dev \
+            libboost-stacktrace-dev \
+            libboost-thread-dev \
+            libcurl4-openssl-dev \
+            libxml2-dev \
+            libssl-dev \
+            libuv1-dev \
+            ninja-build \
+            pkg-config \
+            python3-venv
+
+      - name: Install compatible CMake
+        run: |
+          python3 -m venv "$RUNNER_TEMP/cmake"
+          "$RUNNER_TEMP/cmake/bin/pip" install \
+            --disable-pip-version-check \
+            "cmake==$WL2_CMAKE_VERSION"
+          echo "$RUNNER_TEMP/cmake/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/cmake/bin/cmake" --version
+
+      - name: Restore dependency and compiler caches
+        uses: actions/cache@v5
+        with:
+          path: |
+            .ccache
+            .deps
+          key: >-
+            ${{ runner.os }}-cmake-${{ env.WL2_CMAKE_VERSION }}-gcc-network-
+            ${{ hashFiles('CMakeLists.txt', 'cmake/**/*.cmake', 'modules/**/CMakeLists.txt', 'modules/**/cmake/*.cmake') }}
+          restore-keys: |
+            ${{ runner.os }}-cmake-${{ env.WL2_CMAKE_VERSION }}-gcc-network-
+
+      - name: Configure
+        env:
+          CC: gcc
+          CXX: g++
+        run: |
+          cmake -S . -B build/ci-network -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DWL2_DEPS=download \
+            -DWL2_ENABLE_EXTENDED_MODULES=OFF \
+            -DWL2_ENABLE_3D=OFF \
+            -DWL2_ENABLE_ASIO=ON \
+            -DWL2_ENABLE_CURL=ON \
+            -DWL2_ENABLE_HTTP=ON \
+            -DWL2_ENABLE_MEDIA=ON \
+            -DWL2_ENABLE_ONVIF=ON \
+            -DWL2_ENABLE_SDP=ON \
+            -DWL2_ENABLE_UV=ON \
+            -DWL2_ENABLE_YML=ON \
+            -DWL2_BUILD_DOCS=OFF \
+            -DWL2_BUILD_OUTOFTREE_TESTS=OFF
+
+      - name: Build
+        run: cmake --build build/ci-network
+
+      - name: Test
+        run: ctest --test-dir build/ci-network --output-on-failure
+
+      - name: Show compiler cache statistics
+        if: always()
+        run: ccache --show-stats
+
+      - name: Upload test log
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: network-modules-test-log
+          path: build/ci-network/Testing/Temporary/LastTest.log
+          if-no-files-found: ignore

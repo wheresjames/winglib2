@@ -1,5 +1,7 @@
 # Winglib2
 
+[![CI](https://github.com/wheresjames/winglib2/actions/workflows/ci.yml/badge.svg)](https://github.com/wheresjames/winglib2/actions/workflows/ci.yml)
+
 **Write your app in JavaScript, call into fast C++ when you need it, and ship the
 whole thing as a single self-contained executable.**
 
